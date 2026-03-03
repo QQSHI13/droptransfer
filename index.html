@@ -257,6 +257,31 @@
         .logs.active { display: block; }
         .log-entry { margin: 3px 0; }
         .log-time { color: var(--text-secondary); opacity: 0.7; }
+        
+        .debug-toggle {
+            text-align: center;
+            margin-top: 15px;
+        }
+        .debug-toggle button {
+            background: transparent;
+            border: none;
+            color: var(--text-secondary);
+            font-size: 0.8rem;
+            cursor: pointer;
+            text-decoration: underline;
+        }
+        .debug-toggle button:hover { color: var(--accent); }
+        
+        .connection-state {
+            text-align: center;
+            margin-top: 10px;
+            font-size: 0.8rem;
+            color: var(--text-secondary);
+            min-height: 20px;
+        }
+        .connection-state.connecting { color: var(--accent); }
+        .connection-state.connected { color: var(--success); }
+        .connection-state.failed { color: var(--error); }
     </style>
 </head>
 <body>
@@ -300,6 +325,7 @@
             </div>
             
             <div class="status" id="sendStatus"></div>
+            <div class="connection-state" id="sendConnectionState"></div>
         </div>
         
         <!-- Receive Tab -->
@@ -328,6 +354,11 @@
             </div>
             
             <div class="status" id="receiveStatus"></div>
+            <div class="connection-state" id="receiveConnectionState"></div>
+        </div>
+        
+        <div class="debug-toggle">
+            <button onclick="toggleLogs()">Toggle Debug Logs</button>
         </div>
         
         <div class="logs" id="logs"></div>
@@ -373,6 +404,17 @@
             entry.innerHTML = `<span class="log-time">${new Date().toLocaleTimeString()}</span> ${msg}`;
             logs.appendChild(entry);
             logs.scrollTop = logs.scrollHeight;
+            console.log('[QuickShare] ' + msg);
+        }
+        
+        function toggleLogs() {
+            document.getElementById('logs').classList.toggle('active');
+        }
+        
+        function updateConnectionState(isSender, state, message) {
+            const el = document.getElementById(isSender ? 'sendConnectionState' : 'receiveConnectionState');
+            el.textContent = message;
+            el.className = 'connection-state ' + state;
         }
         
         // File drop handling
@@ -438,21 +480,32 @@
             document.getElementById('codeDisplay').textContent = code;
             document.getElementById('connectionCode').classList.add('active');
             
-            // Store signaling data
-            localStorage.setItem('quickshare_' + code, JSON.stringify({
-                type: 'offer',
-                timestamp: Date.now()
-            }));
-            
             peerConnection = new RTCPeerConnection(RTC_CONFIG);
             
-            // Create data channel
+            // Monitor connection state
+            peerConnection.onconnectionstatechange = () => {
+                const state = peerConnection.connectionState;
+                log('Connection state: ' + state);
+                updateConnectionState(true, state, 'Connection: ' + state);
+                
+                if (state === 'connected') {
+                    showStatus('sendStatus', 'Peer connected!', 'success');
+                } else if (state === 'failed' || state === 'disconnected') {
+                    showStatus('sendStatus', 'Connection failed', 'error');
+                }
+            };
+            
+            peerConnection.oniceconnectionstatechange = () => {
+                log('ICE state: ' + peerConnection.iceConnectionState);
+            };
+            
+            // Create data channel first
             dataChannel = peerConnection.createDataChannel('fileTransfer', {
                 ordered: true
             });
             
             dataChannel.onopen = () => {
-                log('Data channel opened');
+                log('Data channel opened - ready to send');
                 showStatus('sendStatus', 'Connected! Starting transfer...', 'success');
                 sendFile();
             };
@@ -461,13 +514,20 @@
                 log('Data channel closed');
             };
             
-            // Handle ICE candidates
+            dataChannel.onerror = (err) => {
+                log('Data channel error: ' + err.message);
+                showStatus('sendStatus', 'Connection error', 'error');
+            };
+            
+            // Collect ICE candidates
+            const iceCandidates = [];
             peerConnection.onicecandidate = (event) => {
                 if (event.candidate) {
-                    const data = JSON.parse(localStorage.getItem('quickshare_' + code) || '{}');
-                    if (!data.candidates) data.candidates = [];
-                    data.candidates.push(event.candidate);
-                    localStorage.setItem('quickshare_' + code, JSON.stringify(data));
+                    iceCandidates.push(event.candidate);
+                    // Update storage with new candidate
+                    const stored = JSON.parse(localStorage.getItem('quickshare_' + code) || '{}');
+                    stored.candidates = iceCandidates;
+                    localStorage.setItem('quickshare_' + code, JSON.stringify(stored));
                 }
             };
             
@@ -475,10 +535,28 @@
             const offer = await peerConnection.createOffer();
             await peerConnection.setLocalDescription(offer);
             
-            // Store offer
-            const data = JSON.parse(localStorage.getItem('quickshare_' + code));
-            data.offer = offer;
-            localStorage.setItem('quickshare_' + code, JSON.stringify(data));
+            // Wait for ICE gathering to complete or timeout
+            await new Promise((resolve) => {
+                if (peerConnection.iceGatheringState === 'complete') {
+                    resolve();
+                } else {
+                    peerConnection.onicegatheringstatechange = () => {
+                        if (peerConnection.iceGatheringState === 'complete') {
+                            resolve();
+                        }
+                    };
+                    // Timeout after 3 seconds
+                    setTimeout(resolve, 3000);
+                }
+            });
+            
+            // Store signaling data with offer and candidates
+            localStorage.setItem('quickshare_' + code, JSON.stringify({
+                type: 'offer',
+                timestamp: Date.now(),
+                offer: peerConnection.localDescription,
+                candidates: iceCandidates
+            }));
             
             showStatus('sendStatus', 'Share the code below with receiver', 'info');
             
@@ -488,26 +566,61 @@
         
         async function pollForAnswer(code) {
             const checkInterval = setInterval(async () => {
-                const data = JSON.parse(localStorage.getItem('quickshare_' + code) || '{}');
-                
-                if (data.answer && !peerConnection.remoteDescription) {
+                // Check if connection is already established
+                if (peerConnection.connectionState === 'connected') {
                     clearInterval(checkInterval);
-                    log('Received answer');
-                    await peerConnection.setRemoteDescription(data.answer);
-                    
-                    // Add ICE candidates from receiver
+                    return;
+                }
+                
+                const stored = localStorage.getItem('quickshare_' + code);
+                if (!stored) return;
+                
+                const data = JSON.parse(stored);
+                
+                // Check if we already have remote description
+                if (peerConnection.remoteDescription) {
+                    // Just add any new ICE candidates
                     if (data.answerCandidates) {
                         for (const candidate of data.answerCandidates) {
-                            await peerConnection.addIceCandidate(candidate);
+                            try {
+                                await peerConnection.addIceCandidate(candidate);
+                            } catch (e) {
+                                // Ignore errors for already added candidates
+                            }
                         }
+                    }
+                    return;
+                }
+                
+                // Set remote description if we have an answer
+                if (data.answer) {
+                    clearInterval(checkInterval);
+                    log('Received answer, setting remote description');
+                    try {
+                        await peerConnection.setRemoteDescription(data.answer);
+                        
+                        // Add ICE candidates from receiver
+                        if (data.answerCandidates) {
+                            for (const candidate of data.answerCandidates) {
+                                try {
+                                    await peerConnection.addIceCandidate(candidate);
+                                } catch (e) {
+                                    log('Error adding candidate: ' + e.message);
+                                }
+                            }
+                        }
+                    } catch (e) {
+                        log('Error setting remote description: ' + e.message);
+                        showStatus('sendStatus', 'Connection failed', 'error');
                     }
                 }
                 
-                // Clean up old entries (older than 5 minutes)
+                // Clean up old entries
                 if (data.timestamp && Date.now() - data.timestamp > 300000) {
                     localStorage.removeItem('quickshare_' + code);
+                    clearInterval(checkInterval);
                 }
-            }, 1000);
+            }, 500);
         }
         
         async function sendFile() {
@@ -572,14 +685,20 @@
             
             peerConnection = new RTCPeerConnection(RTC_CONFIG);
             
-            // Handle ICE candidates
-            peerConnection.onicecandidate = (event) => {
-                if (event.candidate) {
-                    const stored = JSON.parse(localStorage.getItem('quickshare_' + code) || '{}');
-                    if (!stored.answerCandidates) stored.answerCandidates = [];
-                    stored.answerCandidates.push(event.candidate);
-                    localStorage.setItem('quickshare_' + code, JSON.stringify(stored));
+            // Monitor connection state
+            peerConnection.onconnectionstatechange = () => {
+                const state = peerConnection.connectionState;
+                log('Connection state: ' + state);
+                updateConnectionState(false, state, 'Connection: ' + state);
+                
+                if (state === 'failed' || state === 'disconnected') {
+                    showStatus('receiveStatus', 'Connection failed', 'error');
+                    document.getElementById('connectBtn').disabled = false;
                 }
+            };
+            
+            peerConnection.oniceconnectionstatechange = () => {
+                log('ICE state: ' + peerConnection.iceConnectionState);
             };
             
             // Handle incoming data channel
@@ -598,28 +717,69 @@
                 dataChannel.onopen = () => {
                     log('Data channel opened');
                     document.getElementById('receiveProgressText').textContent = 'Receiving file...';
+                    showStatus('receiveStatus', 'Connected! Receiving file...', 'success');
+                };
+                
+                dataChannel.onerror = (err) => {
+                    log('Data channel error: ' + err.message);
+                    showStatus('receiveStatus', 'Connection error', 'error');
                 };
             };
             
-            // Set remote description (offer)
-            await peerConnection.setRemoteDescription(data.offer);
-            
-            // Add sender's ICE candidates
-            if (data.candidates) {
-                for (const candidate of data.candidates) {
-                    await peerConnection.addIceCandidate(candidate);
+            // Collect ICE candidates
+            const iceCandidates = [];
+            peerConnection.onicecandidate = (event) => {
+                if (event.candidate) {
+                    iceCandidates.push(event.candidate);
                 }
+            };
+            
+            try {
+                // Set remote description (offer)
+                await peerConnection.setRemoteDescription(data.offer);
+                
+                // Add sender's ICE candidates
+                if (data.candidates) {
+                    for (const candidate of data.candidates) {
+                        try {
+                            await peerConnection.addIceCandidate(candidate);
+                        } catch (e) {
+                            log('Error adding sender candidate: ' + e.message);
+                        }
+                    }
+                }
+                
+                // Create answer
+                const answer = await peerConnection.createAnswer();
+                await peerConnection.setLocalDescription(answer);
+                
+                // Wait for ICE gathering
+                await new Promise((resolve) => {
+                    if (peerConnection.iceGatheringState === 'complete') {
+                        resolve();
+                    } else {
+                        peerConnection.onicegatheringstatechange = () => {
+                            if (peerConnection.iceGatheringState === 'complete') {
+                                resolve();
+                            }
+                        };
+                        setTimeout(resolve, 3000);
+                    }
+                });
+                
+                // Store answer with candidates
+                data.answer = peerConnection.localDescription;
+                data.answerCandidates = iceCandidates;
+                localStorage.setItem('quickshare_' + code, JSON.stringify(data));
+                
+                log('Sent answer');
+                document.getElementById('receiveProgressText').textContent = 'Waiting for sender...';
+                
+            } catch (e) {
+                log('Error in connection setup: ' + e.message);
+                showStatus('receiveStatus', 'Connection failed: ' + e.message, 'error');
+                document.getElementById('connectBtn').disabled = false;
             }
-            
-            // Create answer
-            const answer = await peerConnection.createAnswer();
-            await peerConnection.setLocalDescription(answer);
-            
-            // Store answer
-            data.answer = answer;
-            localStorage.setItem('quickshare_' + code, JSON.stringify(data));
-            
-            log('Sent answer');
         }
         
         function handleControlMessage(msg) {
