@@ -370,7 +370,10 @@
                 config: {
                     iceServers: [
                         { urls: 'stun:stun.l.google.com:19302' },
-                        { urls: 'stun:stun1.l.google.com:19302' }
+                        { urls: 'stun:stun1.l.google.com:19302' },
+                        { urls: 'stun:stun2.l.google.com:19302' },
+                        { urls: 'stun:stun3.l.google.com:19302' },
+                        { urls: 'stun:stun4.l.google.com:19302' }
                     ]
                 },
                 debug: 2
@@ -388,7 +391,12 @@
                 console.log('Incoming connection!');
                 document.getElementById('connectionWaiting').style.display = 'none';
                 conn = connection;
-                handleConnection();
+                
+                // Wait for connection to be fully open before handling
+                conn.on('open', () => {
+                    console.log('Sender: Connection fully opened');
+                    handleConnection();
+                });
             });
             
             peer.on('error', (err) => {
@@ -406,11 +414,9 @@
         function handleConnection() {
             console.log('Setting up connection handlers');
             
-            conn.on('open', () => {
-                console.log('Connection opened!');
-                showStatus('sendStatus', '✅ Receiver connected! Sending file...', 'info');
-                sendFile();
-            });
+            // Connection is already open when this is called now
+            showStatus('sendStatus', '✅ Receiver connected! Sending file...', 'info');
+            sendFile();
             
             conn.on('data', (data) => {
                 if (data === 'received') {
@@ -492,23 +498,29 @@
                 config: {
                     iceServers: [
                         { urls: 'stun:stun.l.google.com:19302' },
-                        { urls: 'stun:stun1.l.google.com:19302' }
+                        { urls: 'stun:stun1.l.google.com:19302' },
+                        { urls: 'stun:stun2.l.google.com:19302' },
+                        { urls: 'stun:stun3.l.google.com:19302' },
+                        { urls: 'stun:stun4.l.google.com:19302' }
                     ]
                 },
-                debug: 2  // Enable debug logging
+                debug: 2
             });
             
             peer.on('open', (myId) => {
-                console.log('My peer ID:', myId);
+                console.log('Receiver peer ready. My ID:', myId);
                 showStatus('receiveStatus', 'Connecting to sender...', 'info');
                 
-                // Now connect to the sender
-                conn = peer.connect(code, {
-                    reliable: true,
-                    serialization: 'binary'
-                });
-                
-                setupConnectionHandlers();
+                // Small delay to ensure peer is fully registered
+                setTimeout(() => {
+                    // Now connect to the sender
+                    conn = peer.connect(code, {
+                        reliable: true,
+                        serialization: 'binary'
+                    });
+                    
+                    setupConnectionHandlers();
+                }, 500);
             });
             
             peer.on('error', (err) => {
@@ -526,18 +538,20 @@
                 showStatus('receiveStatus', msg, 'error');
                 document.getElementById('connectBtn').style.display = 'none';
                 document.getElementById('retryBtn').style.display = 'block';
+                clearTimeout(connectionTimeout);
             });
             
-            // Timeout after 15 seconds
-            setTimeout(() => {
+            // Timeout after 20 seconds (increased for slower networks)
+            let connectionTimeout = setTimeout(() => {
                 if (!conn || !conn.open) {
                     console.log('Connection timeout');
-                    showStatus('receiveStatus', '⏱️ Connection timeout. Sender may be offline or code is wrong.', 'error');
+                    showStatus('receiveStatus', '⏱️ Connection timeout. Sender may be offline, code is wrong, or network has NAT issues.', 'error');
                     document.getElementById('connectBtn').style.display = 'none';
                     document.getElementById('retryBtn').style.display = 'block';
+                    if (conn) conn.close();
                     if (peer) peer.destroy();
                 }
-            }, 15000);
+            }, 20000);
         }
         
         function resetReceiver() {
@@ -559,22 +573,22 @@
         
         function setupConnectionHandlers() {
             conn.on('open', () => {
-                console.log('Connection opened!');
+                console.log('Receiver: Connection opened!');
                 showStatus('receiveStatus', '✅ Connected! Waiting for file...', 'success');
                 document.getElementById('receiveProgress').classList.add('show');
             });
-            
+
             conn.on('data', (data) => {
                 console.log('Received data:', data.type || 'chunk');
                 handleData(data);
             });
-            
+
             conn.on('error', (err) => {
                 console.error('Connection error:', err);
                 showStatus('receiveStatus', 'Connection error: ' + err.message, 'error');
                 document.getElementById('connectBtn').disabled = false;
             });
-            
+
             conn.on('close', () => {
                 console.log('Connection closed');
             });
