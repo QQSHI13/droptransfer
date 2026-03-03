@@ -1,0 +1,350 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>QuickShare - P2P File Transfer</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            padding: 20px;
+        }
+        .container {
+            background: white;
+            border-radius: 24px;
+            padding: 40px;
+            max-width: 500px;
+            width: 100%;
+            box-shadow: 0 20px 60px rgba(0,0,0,0.3);
+        }
+        h1 {
+            text-align: center;
+            color: #333;
+            margin-bottom: 10px;
+            font-size: 2rem;
+        }
+        .subtitle {
+            text-align: center;
+            color: #666;
+            margin-bottom: 30px;
+            font-size: 0.95rem;
+        }
+        .drop-zone {
+            border: 3px dashed #ccc;
+            border-radius: 16px;
+            padding: 40px;
+            text-align: center;
+            transition: all 0.3s;
+            cursor: pointer;
+            background: #f8f9fa;
+        }
+        .drop-zone:hover, .drop-zone.dragover {
+            border-color: #667eea;
+            background: #f0f4ff;
+        }
+        .drop-zone svg {
+            width: 60px;
+            height: 60px;
+            color: #667eea;
+            margin-bottom: 15px;
+        }
+        .drop-text {
+            color: #666;
+            font-size: 1rem;
+        }
+        .file-input { display: none; }
+        
+        .status {
+            margin-top: 20px;
+            padding: 15px;
+            border-radius: 12px;
+            text-align: center;
+            display: none;
+        }
+        .status.info { background: #e3f2fd; color: #1976d2; display: block; }
+        .status.success { background: #e8f5e9; color: #388e3c; display: block; }
+        .status.error { background: #ffebee; color: #c62828; display: block; }
+        
+        .qr-section {
+            margin-top: 20px;
+            text-align: center;
+            display: none;
+        }
+        .qr-section.active { display: block; }
+        #qrcode {
+            margin: 20px auto;
+            padding: 20px;
+            background: white;
+            border-radius: 12px;
+            display: inline-block;
+            box-shadow: 0 4px 12px rgba(0,0,0,0.1);
+        }
+        .code-display {
+            font-family: monospace;
+            font-size: 1.5rem;
+            background: #f0f0f0;
+            padding: 15px 25px;
+            border-radius: 8px;
+            margin: 15px 0;
+            letter-spacing: 3px;
+            user-select: all;
+        }
+        .btn {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            border: none;
+            padding: 12px 30px;
+            border-radius: 25px;
+            font-size: 1rem;
+            cursor: pointer;
+            transition: transform 0.2s, box-shadow 0.2s;
+            margin: 5px;
+        }
+        .btn:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 8px 20px rgba(102, 126, 234, 0.4);
+        }
+        .receive-section {
+            margin-top: 25px;
+            padding-top: 25px;
+            border-top: 1px solid #eee;
+        }
+        .receive-section h3 {
+            margin-bottom: 15px;
+            color: #333;
+        }
+        .code-input {
+            width: 100%;
+            padding: 15px;
+            font-size: 1.2rem;
+            text-align: center;
+            letter-spacing: 3px;
+            border: 2px solid #ddd;
+            border-radius: 12px;
+            margin-bottom: 15px;
+            text-transform: uppercase;
+        }
+        .code-input:focus {
+            outline: none;
+            border-color: #667eea;
+        }
+        .progress-bar {
+            width: 100%;
+            height: 8px;
+            background: #e0e0e0;
+            border-radius: 4px;
+            overflow: hidden;
+            margin-top: 15px;
+            display: none;
+        }
+        .progress-bar.active { display: block; }
+        .progress-fill {
+            height: 100%;
+            background: linear-gradient(90deg, #667eea, #764ba2);
+            width: 0%;
+            transition: width 0.3s;
+        }
+        .file-info {
+            margin-top: 15px;
+            padding: 15px;
+            background: #f8f9fa;
+            border-radius: 12px;
+            display: none;
+        }
+        .file-info.active { display: block; }
+        .file-name { font-weight: 600; color: #333; }
+        .file-size { color: #666; font-size: 0.9rem; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>📤 QuickShare</h1>
+        <p class="subtitle">Peer-to-peer file sharing. No server. No signup.</p>
+        
+        <div class="drop-zone" id="dropZone">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+                <polyline points="17 8 12 3 7 8"/>
+                <line x1="12" y1="3" x2="12" y2="15"/>
+            </svg>
+            <p class="drop-text">Drop files here or click to browse</p>
+        </div>
+        <input type="file" class="file-input" id="fileInput">
+        
+        <div class="status" id="status"></div>
+        
+        <div class="file-info" id="fileInfo">
+            <div class="file-name" id="fileName"></div>
+            <div class="file-size" id="fileSize"></div>
+        </div>
+        
+        <div class="progress-bar" id="progressBar">
+            <div class="progress-fill" id="progressFill"></div>
+        </div>
+        
+        <div class="qr-section" id="qrSection">
+            <p>Scan QR code or enter code on another device:</p>
+            <div id="qrcode"></div>
+            <div class="code-display" id="codeDisplay"></div>
+            <button class="btn" onclick="copyCode()">Copy Code</button>
+        </div>
+        
+        <div class="receive-section">
+            <h3>📥 Receive File</h3>
+            <input type="text" class="code-input" id="codeInput" placeholder="ENTER CODE" maxlength="6">
+            <button class="btn" onclick="connectToPeer()">Connect</button>
+        </div>
+    </div>
+
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
+    <script>
+        // Simulate P2P with a simple signaling server concept
+        // In real implementation, this would use WebRTC
+        
+        const dropZone = document.getElementById('dropZone');
+        const fileInput = document.getElementById('fileInput');
+        const status = document.getElementById('status');
+        const qrSection = document.getElementById('qrSection');
+        const codeDisplay = document.getElementById('codeDisplay');
+        const fileInfo = document.getElementById('fileInfo');
+        const fileName = document.getElementById('fileName');
+        const fileSize = document.getElementById('fileSize');
+        const progressBar = document.getElementById('progressBar');
+        const progressFill = document.getElementById('progressFill');
+        
+        let currentFile = null;
+        let shareCode = null;
+        
+        // Mock storage for demo
+        const fileStore = {};
+        
+        dropZone.addEventListener('click', () => fileInput.click());
+        dropZone.addEventListener('dragover', (e) => {
+            e.preventDefault();
+            dropZone.classList.add('dragover');
+        });
+        dropZone.addEventListener('dragleave', () => {
+            dropZone.classList.remove('dragover');
+        });
+        dropZone.addEventListener('drop', (e) => {
+            e.preventDefault();
+            dropZone.classList.remove('dragover');
+            if (e.dataTransfer.files.length) {
+                handleFile(e.dataTransfer.files[0]);
+            }
+        });
+        fileInput.addEventListener('change', (e) => {
+            if (e.target.files.length) {
+                handleFile(e.target.files[0]);
+            }
+        });
+        
+        function handleFile(file) {
+            currentFile = file;
+            fileName.textContent = file.name;
+            fileSize.textContent = formatSize(file.size);
+            fileInfo.classList.add('active');
+            
+            showStatus('File ready to share!', 'success');
+            
+            // Generate share code
+            shareCode = generateCode();
+            codeDisplay.textContent = shareCode;
+            
+            // Store file reference (in real app, this would be P2P)
+            fileStore[shareCode] = {
+                name: file.name,
+                size: file.size,
+                type: file.type
+            };
+            
+            // Generate QR
+            qrSection.classList.add('active');
+            document.getElementById('qrcode').innerHTML = '';
+            new QRCode(document.getElementById('qrcode'), {
+                text: `${window.location.origin}${window.location.pathname}?code=${shareCode}`,
+                width: 200,
+                height: 200,
+                colorDark: '#667eea',
+                colorLight: '#ffffff'
+            });
+            
+            // Simulate waiting for connection
+            showStatus('Waiting for receiver to connect...', 'info');
+        }
+        
+        function generateCode() {
+            return Math.random().toString(36).substring(2, 8).toUpperCase();
+        }
+        
+        function formatSize(bytes) {
+            if (bytes === 0) return '0 Bytes';
+            const k = 1024;
+            const sizes = ['Bytes', 'KB', 'MB', 'GB'];
+            const i = Math.floor(Math.log(bytes) / Math.log(k));
+            return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
+        }
+        
+        function showStatus(msg, type) {
+            status.textContent = msg;
+            status.className = 'status ' + type;
+        }
+        
+        function copyCode() {
+            navigator.clipboard.writeText(shareCode);
+            showStatus('Code copied!', 'success');
+            setTimeout(() => {
+                showStatus('Waiting for receiver to connect...', 'info');
+            }, 1500);
+        }
+        
+        function connectToPeer() {
+            const code = document.getElementById('codeInput').value.toUpperCase();
+            if (!code || code.length !== 6) {
+                showStatus('Please enter a valid 6-character code', 'error');
+                return;
+            }
+            
+            // Simulate connection
+            progressBar.classList.add('active');
+            showStatus('Connecting...', 'info');
+            
+            let progress = 0;
+            const interval = setInterval(() => {
+                progress += 10;
+                progressFill.style.width = progress + '%';
+                
+                if (progress >= 100) {
+                    clearInterval(interval);
+                    if (fileStore[code]) {
+                        showStatus(`Connected! Ready to receive: ${fileStore[code].name}`, 'success');
+                        setTimeout(() => {
+                            showStatus('Transfer complete! (Demo)', 'success');
+                            progressBar.classList.remove('active');
+                            progressFill.style.width = '0%';
+                        }, 1000);
+                    } else {
+                        showStatus('Invalid code or sender disconnected', 'error');
+                        progressBar.classList.remove('active');
+                        progressFill.style.width = '0%';
+                    }
+                }
+            }, 200);
+        }
+        
+        // Check URL for code
+        const urlParams = new URLSearchParams(window.location.search);
+        const codeFromUrl = urlParams.get('code');
+        if (codeFromUrl) {
+            document.getElementById('codeInput').value = codeFromUrl;
+            connectToPeer();
+        }
+    </script>
+</body>
+</html>
