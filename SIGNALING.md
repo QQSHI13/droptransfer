@@ -188,7 +188,7 @@ peer.on('signal', data => socket.emit('signal', roomCode, data));
 socket.on('signal', data => peer.signal(data));
 ```
 
-## Recommendation for QuickShare
+## Recommendation for DropTransfer
 
 **Go with Option 1 (WebSocket)** — it's:
 - Simple to understand
