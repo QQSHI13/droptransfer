@@ -578,13 +578,6 @@
                 console.log('Connection closed');
             });
         }
-            setTimeout(() => {
-                if (conn && !conn.open) {
-                    showStatus('receiveStatus', 'Connection timeout. Check the code and try again.', 'error');
-                    document.getElementById('connectBtn').disabled = false;
-                }
-            }, 10000);
-        }
         
         function handleData(data) {
             if (data.type === 'metadata') {
