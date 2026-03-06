@@ -3,9 +3,10 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>DropTransfer - Simple File Sharing</title>
+    <title>DropTransfer - Secure P2P File Sharing</title>
     <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Crect width='100' height='100' fill='%230d1117' rx='20'/%3E%3Ctext x='50' y='65' font-size='50' text-anchor='middle'%3E📦%3C/text%3E%3C/svg%3E">
     <script src="https://unpkg.com/peerjs@1.5.2/dist/peerjs.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/webtorrent@latest/webtorrent.min.js"></script>
     <style>
         :root {
             --bg: #0d1117;
@@ -17,6 +18,7 @@
             --accent: #58a6ff;
             --success: #238636;
             --error: #da3633;
+            --warning: #d29922;
         }
         * { margin: 0; padding: 0; box-sizing: border-box; }
         body {
@@ -37,206 +39,133 @@
             width: 100%;
             border: 1px solid var(--border);
         }
-        h1 {
-            text-align: center;
-            margin-bottom: 8px;
-            font-size: 1.8rem;
+        h1 { text-align: center; margin-bottom: 8px; font-size: 1.8rem; }
+        .subtitle { text-align: center; color: var(--text-secondary); margin-bottom: 20px; font-size: 0.9rem; }
+        .security-badge {
+            display: flex; align-items: center; justify-content: center; gap: 6px;
+            background: rgba(88, 166, 255, 0.1); color: var(--accent);
+            padding: 6px 12px; border-radius: 20px; font-size: 0.8rem; margin-bottom: 20px;
         }
-        .subtitle {
-            text-align: center;
-            color: var(--text-secondary);
-            margin-bottom: 30px;
-            font-size: 0.9rem;
-        }
+        .security-badge.encrypted { background: rgba(35, 134, 54, 0.1); color: var(--success); }
+        .security-badge.fallback { background: rgba(210, 153, 34, 0.1); color: var(--warning); }
         .tabs {
-            display: flex;
-            gap: 8px;
-            margin-bottom: 24px;
-            background: var(--bg);
-            padding: 4px;
-            border-radius: 8px;
-            border: 1px solid var(--border);
+            display: flex; gap: 8px; margin-bottom: 24px;
+            background: var(--bg); padding: 4px; border-radius: 8px; border: 1px solid var(--border);
         }
         .tab {
-            flex: 1;
-            padding: 10px;
-            border: none;
-            background: transparent;
-            border-radius: 6px;
-            cursor: pointer;
-            color: var(--text-secondary);
-            font-size: 0.95rem;
+            flex: 1; padding: 10px; border: none; background: transparent;
+            border-radius: 6px; cursor: pointer; color: var(--text-secondary); font-size: 0.95rem;
         }
-        .tab.active {
-            background: var(--surface-hover);
-            color: var(--accent);
-            font-weight: 600;
-        }
+        .tab.active { background: var(--surface-hover); color: var(--accent); font-weight: 600; }
         .tab-content { display: none; }
         .tab-content.active { display: block; }
-        
         .drop-zone {
-            border: 2px dashed var(--border);
-            border-radius: 12px;
-            padding: 40px 20px;
-            text-align: center;
-            cursor: pointer;
-            background: var(--bg);
-            transition: all 0.2s;
+            border: 2px dashed var(--border); border-radius: 12px; padding: 40px 20px;
+            text-align: center; cursor: pointer; background: var(--bg); transition: all 0.2s;
         }
-        .drop-zone:hover, .drop-zone.dragover {
-            border-color: var(--accent);
-            background: var(--surface-hover);
-        }
-        .drop-zone .icon {
-            font-size: 3rem;
-            margin-bottom: 12px;
-        }
-        .drop-zone p {
-            color: var(--text-secondary);
-        }
+        .drop-zone:hover, .drop-zone.dragover { border-color: var(--accent); background: var(--surface-hover); }
+        .drop-zone .icon { font-size: 3rem; margin-bottom: 12px; }
+        .drop-zone p { color: var(--text-secondary); }
+        .drop-zone .hint { font-size: 0.75rem; margin-top: 8px; color: var(--text-secondary); opacity: 0.7; }
         input[type="file"] { display: none; }
-        
+        .file-list { margin-top: 16px; max-height: 200px; overflow-y: auto; }
         .file-card {
-            background: var(--bg);
-            border: 1px solid var(--border);
-            border-radius: 8px;
-            padding: 16px;
-            margin-top: 16px;
-            display: none;
+            background: var(--bg); border: 1px solid var(--border); border-radius: 8px;
+            padding: 12px; margin-bottom: 8px; display: none;
         }
         .file-card.show { display: block; }
-        .file-name { font-weight: 600; word-break: break-all; }
-        .file-size { color: var(--text-secondary); font-size: 0.85rem; margin-top: 4px; }
-        
+        .file-card.folder { border-color: var(--accent); background: rgba(88, 166, 255, 0.05); }
+        .file-name { font-weight: 600; word-break: break-all; font-size: 0.9rem; }
+        .file-path { color: var(--text-secondary); font-size: 0.75rem; margin-top: 2px; }
+        .file-size { color: var(--text-secondary); font-size: 0.8rem; margin-top: 4px; }
+        .file-count { 
+            background: var(--accent); color: var(--bg); padding: 2px 8px; border-radius: 12px;
+            font-size: 0.75rem; font-weight: 600; display: inline-block; margin-top: 4px;
+        }
+        .mode-selector { display: flex; gap: 8px; margin-bottom: 16px; }
+        .mode-btn {
+            flex: 1; padding: 10px; border: 1px solid var(--border); background: var(--bg);
+            border-radius: 8px; cursor: pointer; color: var(--text-secondary); font-size: 0.85rem;
+        }
+        .mode-btn:hover { border-color: var(--accent); }
+        .mode-btn.active { border-color: var(--accent); background: rgba(88, 166, 255, 0.1); color: var(--accent); }
         .code-box {
-            background: var(--bg);
-            border: 1px solid var(--border);
-            border-radius: 8px;
-            padding: 16px;
-            margin-top: 16px;
-            text-align: center;
-            display: none;
+            background: var(--bg); border: 1px solid var(--border); border-radius: 8px;
+            padding: 16px; margin-top: 16px; text-align: center; display: none;
         }
         .code-box.show { display: block; }
         .code-label { color: var(--text-secondary); font-size: 0.85rem; margin-bottom: 8px; }
         .code-value {
-            font-family: monospace;
-            font-size: 1.8rem;
-            color: var(--accent);
-            letter-spacing: 4px;
-            cursor: pointer;
-            user-select: all;
+            font-family: monospace; font-size: 1.8rem; color: var(--accent);
+            letter-spacing: 4px; cursor: pointer; user-select: all;
         }
-        .code-hint {
-            color: var(--text-secondary);
-            font-size: 0.8rem;
-            margin-top: 8px;
+        .code-hint { color: var(--text-secondary); font-size: 0.8rem; margin-top: 8px; }
+        .magnet-box {
+            background: var(--bg); border: 1px solid var(--border); border-radius: 8px;
+            padding: 16px; margin-top: 16px; display: none;
         }
-        
-        .progress-bar {
-            height: 6px;
-            background: var(--bg);
-            border-radius: 3px;
-            overflow: hidden;
-            margin-top: 16px;
-            display: none;
+        .magnet-box.show { display: block; }
+        .magnet-label { color: var(--text-secondary); font-size: 0.85rem; margin-bottom: 8px; }
+        .magnet-value {
+            font-family: monospace; font-size: 0.75rem; color: var(--text);
+            word-break: break-all; background: var(--surface); padding: 10px; border-radius: 6px;
+            cursor: pointer; user-select: all; max-height: 80px; overflow-y: auto;
         }
+        .progress-bar { height: 6px; background: var(--bg); border-radius: 3px; overflow: hidden; margin-top: 16px; display: none; }
         .progress-bar.show { display: block; }
-        .progress-fill {
-            height: 100%;
-            background: var(--accent);
-            width: 0%;
-            transition: width 0.3s;
-        }
-        .progress-text {
-            text-align: center;
-            color: var(--text-secondary);
-            font-size: 0.85rem;
-            margin-top: 8px;
-        }
-        
+        .progress-fill { height: 100%; background: var(--accent); width: 0%; transition: width 0.3s; }
+        .progress-text { text-align: center; color: var(--text-secondary); font-size: 0.85rem; margin-top: 8px; }
         .code-input {
-            width: 100%;
-            padding: 16px;
-            font-size: 1.5rem;
-            text-align: center;
-            letter-spacing: 4px;
-            background: var(--bg);
-            border: 1px solid var(--border);
-            border-radius: 8px;
-            color: var(--text);
-            margin-bottom: 12px;
-            text-transform: uppercase;
+            width: 100%; padding: 16px; font-size: 1.5rem; text-align: center; letter-spacing: 4px;
+            background: var(--bg); border: 1px solid var(--border); border-radius: 8px;
+            color: var(--text); margin-bottom: 12px; text-transform: uppercase;
         }
-        .code-input:focus {
-            outline: none;
-            border-color: var(--accent);
+        .code-input:focus { outline: none; border-color: var(--accent); }
+        .magnet-input {
+            width: 100%; padding: 12px; font-size: 0.85rem; background: var(--bg);
+            border: 1px solid var(--border); border-radius: 8px; color: var(--text);
+            margin-bottom: 12px; font-family: monospace;
         }
-        .btn {
-            width: 100%;
-            padding: 14px;
-            background: var(--accent);
-            color: var(--bg);
-            border: none;
-            border-radius: 8px;
-            font-size: 1rem;
-            font-weight: 600;
-            cursor: pointer;
+        .magnet-input:focus { outline: none; border-color: var(--accent); }
+        .btn { width: 100%; padding: 14px; background: var(--accent); color: var(--bg);
+            border: none; border-radius: 8px; font-size: 1rem; font-weight: 600; cursor: pointer;
         }
         .btn:hover { opacity: 0.9; }
-        .btn:disabled {
-            opacity: 0.5;
-            cursor: not-allowed;
-        }
-        
+        .btn:disabled { opacity: 0.5; cursor: not-allowed; }
+        .btn-secondary { background: var(--surface-hover); color: var(--text); margin-top: 10px; }
+        .btn-warning { background: var(--warning); color: var(--bg); }
         .download-box {
-            background: var(--bg);
-            border: 1px solid var(--border);
-            border-radius: 8px;
-            padding: 20px;
-            margin-top: 16px;
-            text-align: center;
-            display: none;
+            background: var(--bg); border: 1px solid var(--border); border-radius: 8px;
+            padding: 20px; margin-top: 16px; text-align: center; display: none;
         }
         .download-box.show { display: block; }
         .download-btn {
-            display: inline-flex;
-            align-items: center;
-            gap: 8px;
-            background: var(--success);
-            color: white;
-            padding: 12px 24px;
-            border-radius: 6px;
-            text-decoration: none;
-            font-weight: 600;
+            display: inline-flex; align-items: center; gap: 8px;
+            background: var(--success); color: white; padding: 12px 24px;
+            border-radius: 6px; text-decoration: none; font-weight: 600;
         }
-        
-        .status {
-            margin-top: 16px;
-            padding: 12px;
-            border-radius: 6px;
-            text-align: center;
-            font-size: 0.9rem;
-            display: none;
-        }
+        .status { margin-top: 16px; padding: 12px; border-radius: 6px; text-align: center; font-size: 0.9rem; display: none; }
         .status.show { display: block; }
         .status.info { background: rgba(88,166,255,0.1); color: var(--accent); }
         .status.success { background: rgba(35,134,54,0.1); color: var(--success); }
         .status.error { background: rgba(218,54,51,0.1); color: var(--error); }
-        
-        footer {
-            text-align: center;
-            margin-top: 24px;
-            color: var(--text-secondary);
-            font-size: 0.8rem;
+        .status.warning { background: rgba(210,153,34,0.1); color: var(--warning); }
+        .transfer-mode-indicator {
+            display: flex; align-items: center; justify-content: center; gap: 8px;
+            padding: 8px; border-radius: 6px; font-size: 0.8rem; margin-bottom: 12px;
         }
+        .transfer-mode-indicator.webrtc { background: rgba(88, 166, 255, 0.1); color: var(--accent); }
+        .transfer-mode-indicator.webtorrent { background: rgba(210, 153, 34, 0.1); color: var(--warning); }
+        footer { text-align: center; margin-top: 24px; color: var(--text-secondary); font-size: 0.8rem; }
+        footer a { color: var(--accent); }
     </style>
 </head>
 <body>
     <div class="container">
         <h1>📦 DropTransfer</h1>
-        <p class="subtitle">Simple P2P file sharing. No upload limits.</p>
+        <p class="subtitle">Secure P2P file sharing with end-to-end encryption</p>
+        
+        <div class="security-badge" id="securityBadge">🔐 End-to-end encryption enabled</div>
         
         <div class="tabs">
             <button class="tab active" onclick="switchTab('send')">Send</button>
@@ -245,69 +174,88 @@
         
         <!-- Send Tab -->
         <div class="tab-content active" id="send-tab">
+            <div class="mode-selector">
+                <button class="mode-btn active" id="modeDirect" onclick="setSendMode('direct')">Direct P2P</button>
+                <button class="mode-btn" id="modeTorrent" onclick="setSendMode('torrent')">WebTorrent</button>
+            </div>
+            
             <div class="drop-zone" id="dropZone">
                 <div class="icon">📤</div>
-                <p>Drop file here or click to browse</p>
+                <p>Drop files or folders here<br>or click to browse</p>
+                <p class="hint">Supports multiple files and entire folders</p>
             </div>
-            <input type="file" id="fileInput">
+            <input type="file" id="fileInput" multiple webkitdirectory>
             
-            <div class="file-card" id="fileCard">
-                <div class="file-name" id="fileName"></div>
-                <div class="file-size" id="fileSize"></div>
-            </div>
+            <div class="file-list" id="fileList"></div>
             
             <div class="code-box" id="codeBox">
                 <div class="code-label">Your transfer code:</div>
-                <div class="code-value" id="peerId" onclick="copyToClipboard()"></div>
+                <div class="code-value" id="peerId" onclick="copyToClipboard('peerId')"></div>
                 <div class="code-hint">Share this code with receiver • Click to copy</div>
-                <div class="connection-waiting" id="connectionWaiting" style="display: none; margin-top: 12px; color: var(--text-secondary); font-size: 0.85rem;">
-                    ⏳ Waiting for receiver to connect...
-                </div>
+                <div class="connection-waiting" id="connectionWaiting" style="display: none; margin-top: 12px; color: var(--text-secondary); font-size: 0.85rem;">⏳ Waiting for receiver to connect...</div>
             </div>
             
-            <div class="progress-bar" id="sendProgress">
-                <div class="progress-fill" id="sendProgressFill"></div>
+            <div class="magnet-box" id="magnetBox">
+                <div class="magnet-label">Magnet link (click to copy):</div>
+                <div class="magnet-value" id="magnetLink" onclick="copyToClipboard('magnetLink')"></div>
+                <div class="code-hint">Share this link via any channel</div>
             </div>
+            
+            <div class="progress-bar" id="sendProgress"><div class="progress-fill" id="sendProgressFill"></div></div>
             <div class="progress-text" id="sendProgressText"></div>
-            
             <div class="status" id="sendStatus"></div>
+            
+            <button class="btn btn-secondary" id="resetBtn" onclick="resetSender()" style="display: none;">🔄 Send Another File</button>
         </div>
         
         <!-- Receive Tab -->
         <div class="tab-content" id="receive-tab">
-            <input type="text" class="code-input" id="codeInput" placeholder="ENTER CODE">
-            <button class="btn" id="connectBtn" onclick="connect()">Connect & Download</button>
-            <button class="btn btn-secondary" id="retryBtn" onclick="resetReceiver()" style="display: none; margin-top: 10px; background: var(--surface-hover); color: var(--text);">🔄 Try Again</button>
-            
-            <div class="progress-bar" id="receiveProgress">
-                <div class="progress-fill" id="receiveProgressFill"></div>
+            <div class="mode-selector">
+                <button class="mode-btn active" id="recvModeDirect" onclick="setRecvMode('direct')">Direct P2P</button>
+                <button class="mode-btn" id="recvModeTorrent" onclick="setRecvMode('torrent')">WebTorrent</button>
             </div>
+            
+            <div id="directReceiveSection">
+                <input type="text" class="code-input" id="codeInput" placeholder="ENTER CODE">
+                <button class="btn" id="connectBtn" onclick="connect()">Connect & Download</button>
+            </div>
+            
+            <div id="torrentReceiveSection" style="display: none;">
+                <input type="text" class="magnet-input" id="magnetInput" placeholder="Paste magnet link here...">
+                <button class="btn" id="torrentBtn" onclick="downloadTorrent()">Download via WebTorrent</button>
+            </div>
+            
+            <button class="btn btn-secondary" id="retryBtn" onclick="resetReceiver()" style="display: none;">🔄 Try Again</button>
+            
+            <div class="transfer-mode-indicator" id="transferModeIndicator" style="display: none;"></div>
+            
+            <div class="progress-bar" id="receiveProgress"><div class="progress-fill" id="receiveProgressFill"></div></div>
             <div class="progress-text" id="receiveProgressText"></div>
             
             <div class="download-box" id="downloadBox">
-                <a class="download-btn" id="downloadLink" href="#" download>
-                    ⬇️ Download File
-                </a>
+                <a class="download-btn" id="downloadLink" href="#" download>⬇️ Download File</a>
             </div>
             
+            <div id="multiFileDownloads"></div>
             <div class="status" id="receiveStatus"></div>
         </div>
         
         <footer>
-            Built with ❤️ by QQ & <a href="https://qqshi13.github.io/nova/" target="_blank">Nova ☄️</a>
+            Built with ❤️ by QQ & <a href="https://qqshi13.github.io/nova/" target="_blank">Nova ☄️</a><br>
+            <small>🔐 Encrypted • 🌐 P2P + WebTorrent Fallback</small>
         </footer>
     </div>
 
     <script>
-        let peer = null;
-        let conn = null;
-        let currentFile = null;
-        let receivedChunks = [];
-        let receivedSize = 0;
-        let fileInfo = null;
         const CHUNK_SIZE = 16384;
+        const ENCRYPTION_ALGORITHM = 'AES-GCM';
+        const KEY_DERIVATION_ALGORITHM = 'PBKDF2';
         
-        // Tab switching
+        let peer = null, conn = null, currentFiles = [], receivedChunks = [];
+        let receivedSize = 0, fileInfo = null, encryptionKey = null;
+        let sendMode = 'direct', recvMode = 'direct', client = null;
+        let isFolderTransfer = false, currentFileIndex = 0, receivedFiles = [];
+        
         function switchTab(tab) {
             document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
             document.querySelectorAll('.tab-content').forEach(c => c.classList.remove('active'));
@@ -315,33 +263,18 @@
             document.getElementById(tab + '-tab').classList.add('active');
         }
         
-        // File drop handling
-        const dropZone = document.getElementById('dropZone');
-        const fileInput = document.getElementById('fileInput');
+        function setSendMode(mode) {
+            sendMode = mode;
+            document.querySelectorAll('#send-tab .mode-btn').forEach(b => b.classList.remove('active'));
+            document.getElementById(mode === 'direct' ? 'modeDirect' : 'modeTorrent').classList.add('active');
+        }
         
-        dropZone.addEventListener('click', () => fileInput.click());
-        dropZone.addEventListener('dragover', (e) => {
-            e.preventDefault();
-            dropZone.classList.add('dragover');
-        });
-        dropZone.addEventListener('dragleave', () => dropZone.classList.remove('dragover'));
-        dropZone.addEventListener('drop', (e) => {
-            e.preventDefault();
-            dropZone.classList.remove('dragover');
-            if (e.dataTransfer.files.length) handleFile(e.dataTransfer.files[0]);
-        });
-        fileInput.addEventListener('change', (e) => {
-            if (e.target.files.length) handleFile(e.target.files[0]);
-        });
-        
-        function handleFile(file) {
-            currentFile = file;
-            document.getElementById('fileName').textContent = file.name;
-            document.getElementById('fileSize').textContent = formatSize(file.size);
-            document.getElementById('fileCard').classList.add('show');
-            
-            showStatus('sendStatus', 'Creating peer connection...', 'info');
-            initSender();
+        function setRecvMode(mode) {
+            recvMode = mode;
+            document.querySelectorAll('#receive-tab .mode-btn').forEach(b => b.classList.remove('active'));
+            document.getElementById(mode === 'direct' ? 'recvModeDirect' : 'recvModeTorrent').classList.add('active');
+            document.getElementById('directReceiveSection').style.display = mode === 'direct' ? 'block' : 'none';
+            document.getElementById('torrentReceiveSection').style.display = mode === 'torrent' ? 'block' : 'none';
         }
         
         function formatSize(bytes) {
@@ -358,24 +291,142 @@
             el.className = 'status show ' + type;
         }
         
-        function hideStatus(id) {
-            document.getElementById(id).className = 'status';
+        function hideStatus(id) { document.getElementById(id).className = 'status'; }
+        
+        function copyToClipboard(elementId) {
+            const el = document.getElementById(elementId);
+            navigator.clipboard.writeText(el.textContent || el.value);
+            showStatus('sendStatus', 'Copied to clipboard!', 'success');
+            setTimeout(() => hideStatus('sendStatus'), 1500);
         }
         
-        // ==================== SENDER ====================
+        async function deriveKey(peerId1, peerId2) {
+            const sortedIds = [peerId1, peerId2].sort();
+            const encoder = new TextEncoder();
+            const data = encoder.encode(sortedIds.join(''));
+            const salt = encoder.encode('DropTransferSalt2024');
+            
+            const keyMaterial = await crypto.subtle.importKey('raw', data, { name: KEY_DERIVATION_ALGORITHM }, false, ['deriveKey']);
+            return crypto.subtle.deriveKey(
+                { name: KEY_DERIVATION_ALGORITHM, salt: salt, iterations: 100000, hash: 'SHA-256' },
+                keyMaterial,
+                { name: ENCRYPTION_ALGORITHM, length: 256 },
+                false,
+                ['encrypt', 'decrypt']
+            );
+        }
+        
+        async function encryptChunk(key, data, iv) {
+            return crypto.subtle.encrypt({ name: ENCRYPTION_ALGORITHM, iv: iv }, key, data);
+        }
+        
+        async function decryptChunk(key, encryptedData, iv) {
+            return crypto.subtle.decrypt({ name: ENCRYPTION_ALGORITHM, iv: iv }, key, encryptedData);
+        }
+        
+        function generateIV() { return crypto.getRandomValues(new Uint8Array(12)); }
+        
+        const dropZone = document.getElementById('dropZone');
+        const fileInput = document.getElementById('fileInput');
+        
+        dropZone.addEventListener('click', () => fileInput.click());
+        dropZone.addEventListener('dragover', (e) => { e.preventDefault(); dropZone.classList.add('dragover'); });
+        dropZone.addEventListener('dragleave', () => dropZone.classList.remove('dragover'));
+        dropZone.addEventListener('drop', async (e) => {
+            e.preventDefault();
+            dropZone.classList.remove('dragover');
+            const items = e.dataTransfer.items;
+            if (!items) return;
+            
+            currentFiles = []; isFolderTransfer = false;
+            for (let i = 0; i < items.length; i++) {
+                const item = items[i];
+                if (item.kind === 'file') {
+                    const entry = item.webkitGetAsEntry();
+                    if (entry) await traverseEntry(entry, '');
+                }
+            }
+            if (currentFiles.length > 0) {
+                displayFileList();
+                if (sendMode === 'direct') initSender(); else initTorrentSender();
+            }
+        });
+        
+        fileInput.addEventListener('change', async (e) => {
+            const files = Array.from(e.target.files);
+            if (files.length === 0) return;
+            currentFiles = []; isFolderTransfer = false;
+            for (const file of files) {
+                currentFiles.push({ file: file, path: file.name, relativePath: file.webkitRelativePath || file.name });
+            }
+            displayFileList();
+            if (sendMode === 'direct') initSender(); else initTorrentSender();
+        });
+        
+        async function traverseEntry(entry, path) {
+            if (entry.isFile) {
+                return new Promise((resolve) => {
+                    entry.file(file => {
+                        currentFiles.push({ file: file, path: path + entry.name, relativePath: path + entry.name });
+                        resolve();
+                    });
+                });
+            } else if (entry.isDirectory) {
+                isFolderTransfer = true;
+                const dirReader = entry.createReader();
+                return new Promise((resolve) => {
+                    const readEntries = () => {
+                        dirReader.readEntries(async (entries) => {
+                            if (entries.length === 0) { resolve(); return; }
+                            for (const subEntry of entries) await traverseEntry(subEntry, path + entry.name + '/');
+                            readEntries();
+                        });
+                    };
+                    readEntries();
+                });
+            }
+        }
+        
+        function displayFileList() {
+            const fileList = document.getElementById('fileList');
+            fileList.innerHTML = '';
+            const totalSize = currentFiles.reduce((sum, f) => sum + f.file.size, 0);
+            
+            if (isFolderTransfer || currentFiles.length > 1) {
+                const folderCard = document.createElement('div');
+                folderCard.className = 'file-card folder show';
+                folderCard.innerHTML = `<div class="file-name">📁 ${isFolderTransfer ? 'Folder' : 'Multiple Files'}</div><div class="file-count">${currentFiles.length} files • ${formatSize(totalSize)}</div>`;
+                fileList.appendChild(folderCard);
+                
+                const maxPreview = 5;
+                currentFiles.slice(0, maxPreview).forEach(f => {
+                    const card = document.createElement('div');
+                    card.className = 'file-card show';
+                    card.innerHTML = `<div class="file-name">${f.file.name}</div>${f.path !== f.file.name ? `<div class="file-path">${f.path}</div>` : ''}<div class="file-size">${formatSize(f.file.size)}</div>`;
+                    fileList.appendChild(card);
+                });
+                if (currentFiles.length > maxPreview) {
+                    const moreCard = document.createElement('div');
+                    moreCard.className = 'file-card show';
+                    moreCard.style.cssText = 'text-align: center; color: var(--text-secondary);';
+                    moreCard.textContent = `... and ${currentFiles.length - maxPreview} more files`;
+                    fileList.appendChild(moreCard);
+                }
+            } else if (currentFiles.length === 1) {
+                const f = currentFiles[0];
+                const card = document.createElement('div');
+                card.className = 'file-card show';
+                card.innerHTML = `<div class="file-name">${f.file.name}</div><div class="file-size">${formatSize(f.file.size)}</div>`;
+                fileList.appendChild(card);
+            }
+        }
+        
         function initSender() {
             console.log('Initializing sender peer...');
+            showStatus('sendStatus', 'Creating peer connection...', 'info');
             
             peer = new Peer({
-                config: {
-                    iceServers: [
-                        { urls: 'stun:stun.l.google.com:19302' },
-                        { urls: 'stun:stun1.l.google.com:19302' },
-                        { urls: 'stun:stun2.l.google.com:19302' },
-                        { urls: 'stun:stun3.l.google.com:19302' },
-                        { urls: 'stun:stun4.l.google.com:19302' }
-                    ]
-                },
+                config: { iceServers: [{ urls: 'stun:stun.l.google.com:19302' }, { urls: 'stun:stun1.l.google.com:19302' }, { urls: 'stun:stun2.l.google.com:19302' }] },
                 debug: 2
             });
             
@@ -384,249 +435,334 @@
                 document.getElementById('peerId').textContent = id;
                 document.getElementById('codeBox').classList.add('show');
                 document.getElementById('connectionWaiting').style.display = 'block';
-                showStatus('sendStatus', '✅ Ready! Share the code above with receiver', 'success');
+                showStatus('sendStatus', 'Ready! Share the code above with receiver', 'success');
             });
             
-            peer.on('connection', (connection) => {
-                console.log('Incoming connection!');
+            peer.on('connection', async (connection) => {
+                console.log('Incoming connection from:', connection.peer);
                 document.getElementById('connectionWaiting').style.display = 'none';
                 conn = connection;
+                try {
+                    encryptionKey = await deriveKey(peer.id, connection.peer);
+                    document.getElementById('securityBadge').classList.add('encrypted');
+                    document.getElementById('securityBadge').innerHTML = '🔒 Encrypted connection established';
+                } catch (err) { console.error('Key derivation failed:', err); }
                 
-                // Wait for connection to be fully open before handling
-                conn.on('open', () => {
-                    console.log('Sender: Connection fully opened');
-                    handleConnection();
-                });
+                conn.on('open', () => { console.log('Sender: Connection fully opened'); handleConnection(); });
             });
             
             peer.on('error', (err) => {
                 console.error('Peer error:', err);
-                showStatus('sendStatus', 'Error: ' + err.message + '. Please refresh and try again.', 'error');
-            });
-            
-            peer.on('disconnected', () => {
-                console.log('Peer disconnected');
-                showStatus('sendStatus', 'Disconnected. Reconnecting...', 'info');
-                peer.reconnect();
+                showStatus('sendStatus', 'Error: ' + err.message + '. Try WebTorrent mode.', 'error');
             });
         }
         
         function handleConnection() {
             console.log('Setting up connection handlers');
-            
-            // Connection is already open when this is called now
-            showStatus('sendStatus', '✅ Receiver connected! Sending file...', 'info');
-            sendFile();
+            showStatus('sendStatus', 'Receiver connected! Sending file(s)...', 'info');
+            sendFiles();
             
             conn.on('data', (data) => {
                 if (data === 'received') {
-                    showStatus('sendStatus', '✅ File sent successfully!', 'success');
+                    showStatus('sendStatus', 'File(s) sent successfully!', 'success');
+                    document.getElementById('resetBtn').style.display = 'block';
                 }
             });
-            
-            conn.on('error', (err) => {
-                console.error('Connection error:', err);
-                showStatus('sendStatus', 'Transfer error: ' + err.message, 'error');
-            });
-            
-            conn.on('close', () => {
-                console.log('Connection closed');
-            });
+            conn.on('error', (err) => { console.error('Connection error:', err); showStatus('sendStatus', 'Transfer error: ' + err.message, 'error'); });
         }
         
-        async function sendFile() {
-            // Send file metadata
-            conn.send({
-                type: 'metadata',
-                name: currentFile.name,
-                size: currentFile.size
-            });
+        async function sendFiles() {
+            const metadata = {
+                type: 'metadata', isFolder: isFolderTransfer, fileCount: currentFiles.length,
+                files: currentFiles.map(f => ({ name: f.file.name, path: f.path, size: f.file.size })),
+                totalSize: currentFiles.reduce((sum, f) => sum + f.file.size, 0)
+            };
+            conn.send(metadata);
             
-            const buffer = await currentFile.arrayBuffer();
-            const totalChunks = Math.ceil(buffer.byteLength / CHUNK_SIZE);
-            
+            let totalBytesSent = 0;
+            const totalBytes = metadata.totalSize;
             document.getElementById('sendProgress').classList.add('show');
             
-            for (let i = 0; i < totalChunks; i++) {
-                const start = i * CHUNK_SIZE;
-                const end = Math.min(start + CHUNK_SIZE, buffer.byteLength);
-                const chunk = buffer.slice(start, end);
+            for (let fileIndex = 0; fileIndex < currentFiles.length; fileIndex++) {
+                const { file, path } = currentFiles[fileIndex];
+                const buffer = await file.arrayBuffer();
+                const totalChunks = Math.ceil(buffer.byteLength / CHUNK_SIZE);
                 
-                conn.send({
-                    type: 'chunk',
-                    data: chunk,
-                    index: i,
-                    total: totalChunks
-                });
+                conn.send({ type: 'fileStart', fileIndex: fileIndex, path: path, name: file.name });
                 
-                const progress = ((i + 1) / totalChunks) * 100;
-                document.getElementById('sendProgressFill').style.width = progress + '%';
-                document.getElementById('sendProgressText').textContent = 
-                    `Sending... ${Math.round(progress)}%`;
-                
-                // Small delay to prevent overwhelming
-                await new Promise(r => setTimeout(r, 5));
+                for (let i = 0; i < totalChunks; i++) {
+                    const start = i * CHUNK_SIZE;
+                    const end = Math.min(start + CHUNK_SIZE, buffer.byteLength);
+                    let chunk = buffer.slice(start, end);
+                    let iv = null;
+                    
+                    if (encryptionKey) { iv = generateIV(); chunk = await encryptChunk(encryptionKey, chunk, iv); }
+                    
+                    conn.send({ type: 'chunk', data: chunk, index: i, total: totalChunks, iv: iv ? Array.from(iv) : null });
+                    
+                    totalBytesSent += (end - start);
+                    const progress = (totalBytesSent / totalBytes) * 100;
+                    document.getElementById('sendProgressFill').style.width = progress + '%';
+                    document.getElementById('sendProgressText').textContent = `Sending ${file.name}... ${Math.round(progress)}%`;
+                    await new Promise(r => setTimeout(r, 5));
+                }
+                conn.send({ type: 'fileDone', fileIndex: fileIndex });
             }
-            
             conn.send({ type: 'done' });
             document.getElementById('sendProgressText').textContent = 'Transfer complete!';
         }
         
-        function copyToClipboard() {
-            const code = document.getElementById('peerId').textContent;
-            navigator.clipboard.writeText(code);
-            showStatus('sendStatus', 'Code copied!', 'success');
-            setTimeout(() => {
-                showStatus('sendStatus', 'Ready! Waiting for receiver...', 'success');
-            }, 1500);
+        function resetSender() {
+            if (conn) conn.close();
+            if (peer) peer.destroy();
+            conn = null; peer = null; currentFiles = []; encryptionKey = null;
+            document.getElementById('fileList').innerHTML = '';
+            document.getElementById('codeBox').classList.remove('show');
+            document.getElementById('sendProgress').classList.remove('show');
+            document.getElementById('sendProgressFill').style.width = '0%';
+            document.getElementById('sendProgressText').textContent = '';
+            document.getElementById('resetBtn').style.display = 'none';
+            document.getElementById('securityBadge').classList.remove('encrypted');
+            document.getElementById('securityBadge').innerHTML = '🔐 End-to-end encryption enabled';
+            hideStatus('sendStatus');
         }
         
         // ==================== RECEIVER ====================
         function connect() {
             const code = document.getElementById('codeInput').value.trim();
-            if (!code) {
-                showStatus('receiveStatus', 'Please enter a code', 'error');
-                return;
-            }
+            if (!code) { showStatus('receiveStatus', 'Please enter a code', 'error'); return; }
             
             document.getElementById('connectBtn').disabled = true;
             showStatus('receiveStatus', 'Initializing...', 'info');
-            console.log('Connecting to peer:', code);
+            document.getElementById('transferModeIndicator').style.display = 'flex';
+            document.getElementById('transferModeIndicator').className = 'transfer-mode-indicator webrtc';
+            document.getElementById('transferModeIndicator').textContent = '🌐 Connecting via WebRTC...';
             
-            // Create peer first
             peer = new Peer({
-                config: {
-                    iceServers: [
-                        { urls: 'stun:stun.l.google.com:19302' },
-                        { urls: 'stun:stun1.l.google.com:19302' },
-                        { urls: 'stun:stun2.l.google.com:19302' },
-                        { urls: 'stun:stun3.l.google.com:19302' },
-                        { urls: 'stun:stun4.l.google.com:19302' }
-                    ]
-                },
+                config: { iceServers: [{ urls: 'stun:stun.l.google.com:19302' }, { urls: 'stun:stun1.l.google.com:19302' }] },
                 debug: 2
             });
             
             peer.on('open', (myId) => {
                 console.log('Receiver peer ready. My ID:', myId);
                 showStatus('receiveStatus', 'Connecting to sender...', 'info');
-                
-                // Small delay to ensure peer is fully registered
                 setTimeout(() => {
-                    // Now connect to the sender
-                    conn = peer.connect(code, {
-                        reliable: true,
-                        serialization: 'binary'
-                    });
-                    
-                    setupConnectionHandlers();
+                    conn = peer.connect(code, { reliable: true, serialization: 'binary' });
+                    setupConnectionHandlers(code);
                 }, 500);
             });
             
             peer.on('error', (err) => {
                 console.error('Peer error:', err);
                 let msg = 'Connection failed';
-                if (err.type === 'peer-unavailable') {
-                    msg = '❌ Sender not found. Make sure the code is correct and sender is ready.';
-                } else if (err.type === 'network') {
-                    msg = '❌ Network error. Check your internet connection.';
-                } else if (err.type === 'server-error') {
-                    msg = '❌ Server busy. Please try again in a moment.';
-                } else {
-                    msg = '❌ ' + err.message;
-                }
+                if (err.type === 'peer-unavailable') msg = 'Sender not found. Check the code or try WebTorrent mode.';
+                else if (err.type === 'network') msg = 'Network error. Check your connection.';
+                else if (err.type === 'server-error') msg = 'Server busy. Try again or use WebTorrent.';
+                else msg = err.message;
+                
                 showStatus('receiveStatus', msg, 'error');
+                document.getElementById('transferModeIndicator').className = 'transfer-mode-indicator webtorrent';
+                document.getElementById('transferModeIndicator').innerHTML = '⚠️ WebRTC failed. <a href="#" onclick="setRecvMode(\'torrent\')" style="color: var(--accent);">Try WebTorrent</a>';
                 document.getElementById('connectBtn').style.display = 'none';
                 document.getElementById('retryBtn').style.display = 'block';
-                clearTimeout(connectionTimeout);
             });
             
-            // Timeout after 20 seconds (increased for slower networks)
             let connectionTimeout = setTimeout(() => {
                 if (!conn || !conn.open) {
-                    console.log('Connection timeout');
-                    showStatus('receiveStatus', '⏱️ Connection timeout. Sender may be offline, code is wrong, or network has NAT issues.', 'error');
+                    showStatus('receiveStatus', 'Connection timeout. Try WebTorrent mode.', 'error');
+                    document.getElementById('transferModeIndicator').className = 'transfer-mode-indicator webtorrent';
+                    document.getElementById('transferModeIndicator').innerHTML = '⚠️ WebRTC timeout. <a href="#" onclick="setRecvMode(\'torrent\')" style="color: var(--accent);">Try WebTorrent</a>';
                     document.getElementById('connectBtn').style.display = 'none';
                     document.getElementById('retryBtn').style.display = 'block';
-                    if (conn) conn.close();
-                    if (peer) peer.destroy();
+                    if (conn) conn.close(); if (peer) peer.destroy();
                 }
             }, 20000);
         }
         
-        function resetReceiver() {
-            // Clean up
-            if (conn) conn.close();
-            if (peer) peer.destroy();
-            conn = null;
-            peer = null;
+        async function setupConnectionHandlers(senderId) {
+            conn.on('open', async () => {
+                console.log('Receiver: Connection opened!');
+                document.getElementById('transferModeIndicator').textContent = '🔒 Encrypted WebRTC connection';
+                showStatus('receiveStatus', 'Connected! Waiting for file...', 'success');
+                document.getElementById('receiveProgress').classList.add('show');
+                try {
+                    encryptionKey = await deriveKey(senderId, peer.id);
+                } catch (err) { console.error('Key derivation failed:', err); }
+            });
             
-            // Reset UI
+            conn.on('data', (data) => handleData(data));
+            conn.on('error', (err) => { console.error('Connection error:', err); showStatus('receiveStatus', 'Connection error: ' + err.message, 'error'); document.getElementById('connectBtn').disabled = false; });
+            conn.on('close', () => console.log('Connection closed'));
+        }
+        
+        async function handleData(data) {
+            if (data.type === 'metadata') {
+                fileInfo = data;
+                receivedChunks = []; receivedSize = 0;
+                receivedFiles = [];
+                currentFileIndex = 0;
+                isFolderTransfer = data.isFolder;
+                document.getElementById('receiveProgressText').textContent = `Receiving ${data.fileCount} file(s)...`;
+            } else if (data.type === 'fileStart') {
+                if (receivedChunks.length > 0) {
+                    const blob = new Blob(receivedChunks);
+                    receivedFiles.push({ blob, path: fileInfo.files[currentFileIndex].path, name: fileInfo.files[currentFileIndex].name });
+                }
+                receivedChunks = []; receivedSize = 0; currentFileIndex = data.fileIndex;
+            } else if (data.type === 'chunk') {
+                let chunkData = data.data;
+                if (encryptionKey && data.iv) {
+                    const iv = new Uint8Array(data.iv);
+                    chunkData = await decryptChunk(encryptionKey, chunkData, iv);
+                }
+                receivedChunks.push(chunkData);
+                receivedSize += chunkData.byteLength;
+                const progress = (receivedSize / fileInfo.totalSize) * 100;
+                document.getElementById('receiveProgressFill').style.width = progress + '%';
+                document.getElementById('receiveProgressText').textContent = `Receiving... ${Math.round(progress)}% (${formatSize(receivedSize)} / ${formatSize(fileInfo.totalSize)})`;
+            } else if (data.type === 'fileDone') {
+                const blob = new Blob(receivedChunks);
+                receivedFiles.push({ blob, path: fileInfo.files[data.fileIndex].path, name: fileInfo.files[data.fileIndex].name });
+                receivedChunks = [];
+            } else if (data.type === 'done') {
+                if (receivedChunks.length > 0) {
+                    const blob = new Blob(receivedChunks);
+                    receivedFiles.push({ blob, path: fileInfo.files[currentFileIndex].path, name: fileInfo.files[currentFileIndex].name });
+                }
+                finalizeTransfer();
+            }
+        }
+        
+        function finalizeTransfer() {
+            document.getElementById('receiveProgress').classList.remove('show');
+            
+            if (receivedFiles.length === 1) {
+                const file = receivedFiles[0];
+                const url = URL.createObjectURL(file.blob);
+                const downloadLink = document.getElementById('downloadLink');
+                downloadLink.href = url;
+                downloadLink.download = file.name;
+                document.getElementById('downloadBox').classList.add('show');
+                showStatus('receiveStatus', 'File received! Click download below.', 'success');
+            } else {
+                const multiFileDiv = document.getElementById('multiFileDownloads');
+                multiFileDiv.innerHTML = '<div style="margin-top: 16px; font-weight: 600;">Received Files:</div>';
+                receivedFiles.forEach((file, idx) => {
+                    const url = URL.createObjectURL(file.blob);
+                    const btn = document.createElement('a');
+                    btn.href = url;
+                    btn.download = file.name;
+                    btn.className = 'download-btn';
+                    btn.style.marginTop = '8px';
+                    btn.innerHTML = `⬇️ ${file.name}`;
+                    multiFileDiv.appendChild(btn);
+                });
+                showStatus('receiveStatus', `${receivedFiles.length} files received!`, 'success');
+            }
+            
+            document.getElementById('retryBtn').textContent = '🔄 Receive Another File';
+            document.getElementById('retryBtn').style.display = 'block';
+            if (conn) conn.send('received');
+        }
+        
+        function resetReceiver() {
+            if (conn) conn.close(); if (peer) peer.destroy();
+            conn = null; peer = null; encryptionKey = null; receivedFiles = [];
             document.getElementById('codeInput').value = '';
+            document.getElementById('magnetInput').value = '';
             document.getElementById('connectBtn').style.display = 'block';
             document.getElementById('connectBtn').disabled = false;
             document.getElementById('retryBtn').style.display = 'none';
             document.getElementById('receiveProgress').classList.remove('show');
+            document.getElementById('receiveProgressFill').style.width = '0%';
             document.getElementById('downloadBox').classList.remove('show');
+            document.getElementById('multiFileDownloads').innerHTML = '';
+            document.getElementById('transferModeIndicator').style.display = 'none';
             hideStatus('receiveStatus');
         }
         
-        function setupConnectionHandlers() {
-            conn.on('open', () => {
-                console.log('Receiver: Connection opened!');
-                showStatus('receiveStatus', '✅ Connected! Waiting for file...', 'success');
-                document.getElementById('receiveProgress').classList.add('show');
-            });
-
-            conn.on('data', (data) => {
-                console.log('Received data:', data.type || 'chunk');
-                handleData(data);
-            });
-
-            conn.on('error', (err) => {
-                console.error('Connection error:', err);
-                showStatus('receiveStatus', 'Connection error: ' + err.message, 'error');
-                document.getElementById('connectBtn').disabled = false;
-            });
-
-            conn.on('close', () => {
-                console.log('Connection closed');
+        // ==================== WEBTORRENT ====================
+        function initTorrentSender() {
+            if (!client) client = new WebTorrent();
+            
+            const files = currentFiles.map(f => f.file);
+            showStatus('sendStatus', 'Creating torrent...', 'info');
+            
+            client.seed(files, { name: isFolderTransfer ? 'DropTransfer' : files[0].name }, (torrent) => {
+                console.log('Seeding:', torrent.magnetURI);
+                document.getElementById('magnetLink').textContent = torrent.magnetURI;
+                document.getElementById('magnetBox').classList.add('show');
+                showStatus('sendStatus', 'Torrent ready! Share the magnet link.', 'success');
+                
+                torrent.on('upload', (bytes) => {
+                    document.getElementById('sendProgressFill').style.width = '100%';
+                    document.getElementById('sendProgressText').textContent = `Uploading... ${formatSize(torrent.uploaded)} uploaded`;
+                });
+                
+                document.getElementById('sendProgress').classList.add('show');
+                document.getElementById('resetBtn').style.display = 'block';
             });
         }
         
-        function handleData(data) {
-            if (data.type === 'metadata') {
-                fileInfo = data;
-                receivedChunks = [];
-                receivedSize = 0;
-                document.getElementById('receiveProgressText').textContent = 
-                    `Receiving ${fileInfo.name}...`;
+        function downloadTorrent() {
+            const magnet = document.getElementById('magnetInput').value.trim();
+            if (!magnet || !magnet.startsWith('magnet:')) {
+                showStatus('receiveStatus', 'Please enter a valid magnet link', 'error');
+                return;
             }
-            else if (data.type === 'chunk') {
-                receivedChunks.push(data.data);
-                receivedSize += data.data.byteLength;
+            
+            if (!client) client = new WebTorrent();
+            
+            document.getElementById('torrentBtn').disabled = true;
+            document.getElementById('transferModeIndicator').style.display = 'flex';
+            document.getElementById('transferModeIndicator').className = 'transfer-mode-indicator webtorrent';
+            document.getElementById('transferModeIndicator').textContent = '🌐 Downloading via WebTorrent...';
+            showStatus('receiveStatus', 'Connecting to peers...', 'info');
+            
+            client.add(magnet, (torrent) => {
+                console.log('Downloading:', torrent.name);
+                showStatus('receiveStatus', `Downloading ${torrent.files.length} file(s)...`, 'info');
+                document.getElementById('receiveProgress').classList.add('show');
                 
-                const progress = (data.index + 1) / data.total * 100;
-                document.getElementById('receiveProgressFill').style.width = progress + '%';
-                document.getElementById('receiveProgressText').textContent = 
-                    `Receiving... ${Math.round(progress)}% (${formatSize(receivedSize)} / ${formatSize(fileInfo.size)})`;
-            }
-            else if (data.type === 'done') {
-                // Assemble file
-                const blob = new Blob(receivedChunks);
-                const url = URL.createObjectURL(blob);
+                torrent.on('download', (bytes) => {
+                    const progress = torrent.progress * 100;
+                    document.getElementById('receiveProgressFill').style.width = progress + '%';
+                    document.getElementById('receiveProgressText').textContent = 
+                        `Downloading... ${Math.round(progress)}% (${formatSize(torrent.downloaded)} / ${formatSize(torrent.length)})`;
+                });
                 
-                const downloadLink = document.getElementById('downloadLink');
-                downloadLink.href = url;
-                downloadLink.download = fileInfo.name;
-                
-                document.getElementById('downloadBox').classList.add('show');
-                document.getElementById('receiveProgress').classList.remove('show');
-                showStatus('receiveStatus', 'File received! Click download below.', 'success');
-                
-                // Notify sender
-                conn.send('received');
-            }
+                torrent.on('done', () => {
+                    console.log('Download complete');
+                    document.getElementById('receiveProgress').classList.remove('show');
+                    
+                    const multiFileDiv = document.getElementById('multiFileDownloads');
+                    multiFileDiv.innerHTML = '<div style="margin-top: 16px; font-weight: 600;">Downloaded Files:</div>';
+                    
+                    torrent.files.forEach(file => {
+                        file.getBlob((err, blob) => {
+                            if (err) return;
+                            const url = URL.createObjectURL(blob);
+                            const btn = document.createElement('a');
+                            btn.href = url;
+                            btn.download = file.name;
+                            btn.className = 'download-btn';
+                            btn.style.marginTop = '8px';
+                            btn.innerHTML = `⬇️ ${file.name}`;
+                            multiFileDiv.appendChild(btn);
+                        });
+                    });
+                    
+                    showStatus('receiveStatus', 'Download complete!', 'success');
+                    document.getElementById('transferModeIndicator').textContent = '✅ WebTorrent download complete';
+                    document.getElementById('retryBtn').textContent = '🔄 Download Another File';
+                    document.getElementById('retryBtn').style.display = 'block';
+                });
+            });
+            
+            client.on('error', (err) => {
+                showStatus('receiveStatus', 'WebTorrent error: ' + err.message, 'error');
+                document.getElementById('torrentBtn').disabled = false;
+            });
         }
     </script>
 </body>
