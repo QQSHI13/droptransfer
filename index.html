@@ -249,6 +249,26 @@
     </div>
 
     <script>
+        // Unregister any existing service workers to clear old PWA cache
+        if ('serviceWorker' in navigator) {
+            navigator.serviceWorker.getRegistrations().then(registrations => {
+                for (let registration of registrations) {
+                    registration.unregister();
+                    console.log('Service worker unregistered:', registration.scope);
+                }
+            });
+            // Also clear all caches
+            if ('caches' in window) {
+                caches.keys().then(cacheNames => {
+                    cacheNames.forEach(cacheName => {
+                        caches.delete(cacheName);
+                        console.log('Cache deleted:', cacheName);
+                    });
+                });
+            }
+        }
+    </script>
+    <script>
         const CHUNK_SIZE = 262144; // Increased from 16KB to 256KB for much better throughput
         const ENCRYPTION_ALGORITHM = 'AES-GCM';
         const KEY_DERIVATION_ALGORITHM = 'PBKDF2';
