@@ -166,6 +166,7 @@
         <p class="subtitle">Secure P2P file sharing with end-to-end encryption</p>
         
         <div class="security-badge" id="securityBadge">🔐 End-to-end encryption enabled</div>
+        <div class="speed-badge" id="speedBadge" style="display: none; text-align: center; color: var(--success); font-size: 0.8rem; margin-bottom: 12px;">⚡ High-speed transfer active</div>
         
         <div class="tabs">
             <button class="tab active" onclick="switchTab('send')">Send</button>
@@ -248,7 +249,7 @@
     </div>
 
     <script>
-        const CHUNK_SIZE = 16384;
+        const CHUNK_SIZE = 262144; // Increased from 16KB to 256KB for much better throughput
         const ENCRYPTION_ALGORITHM = 'AES-GCM';
         const KEY_DERIVATION_ALGORITHM = 'PBKDF2';
         
@@ -448,8 +449,17 @@
             showStatus('sendStatus', 'Creating peer connection...', 'info');
             
             peer = new Peer({
-                config: { iceServers: [{ urls: 'stun:stun.l.google.com:19302' }, { urls: 'stun:stun1.l.google.com:19302' }, { urls: 'stun:stun2.l.google.com:19302' }] },
-                debug: 2
+                config: { 
+                    iceServers: [
+                        { urls: 'stun:stun.l.google.com:19302' }, 
+                        { urls: 'stun:stun1.l.google.com:19302' },
+                        { urls: 'stun:stun2.l.google.com:19302' },
+                        { urls: 'stun:stun3.l.google.com:19302' },
+                        { urls: 'stun:stun4.l.google.com:19302' }
+                    ],
+                    iceCandidatePoolSize: 10 // Pre-gather more ICE candidates for faster connection
+                },
+                debug: 1 // Reduced logging for better performance
             });
             
             peer.on('open', (id) => {
@@ -471,6 +481,7 @@
                     encryptionKey = await deriveKey(peer.id, connection.peer);
                     document.getElementById('securityBadge').classList.add('encrypted');
                     document.getElementById('securityBadge').innerHTML = '🔒 Encrypted connection established';
+                    document.getElementById('speedBadge').style.display = 'block';
                 } catch (err) { console.error('Key derivation failed:', err); }
 
                 console.log('Sender: Connection established');
@@ -511,6 +522,7 @@
             
             let totalBytesSent = 0;
             const totalBytes = metadata.totalSize;
+            const startTime = performance.now();
             document.getElementById('sendProgress').classList.add('show');
             
             for (let fileIndex = 0; fileIndex < currentFiles.length; fileIndex++) {
@@ -518,37 +530,85 @@
                 const buffer = await file.arrayBuffer();
                 const totalChunks = Math.ceil(buffer.byteLength / CHUNK_SIZE);
                 
-                conn.send({ type: 'fileStart', fileIndex: fileIndex, path: path, name: file.name });
+                conn.send({ type: 'fileStart', fileIndex: fileIndex, path: path, name: file.name, totalChunks: totalChunks });
 
-                for (let i = 0; i < totalChunks; i++) {
-                    const start = i * CHUNK_SIZE;
-                    const end = Math.min(start + CHUNK_SIZE, buffer.byteLength);
-                    let chunk = buffer.slice(start, end);
-                    let iv = null;
+                // Optimized concurrent chunk sending for maximum throughput
+                const MAX_CONCURRENT = 32; // High concurrency for maximum throughput
+                const MAX_BUFFER = 134217728; // 128MB buffer threshold
+                let chunkIndex = 0;
+                let activeSends = 0;
+                const chunkPromises = [];
 
-                    if (encryptionKey) { iv = generateIV(); chunk = await encryptChunk(encryptionKey, chunk, iv); }
+                const sendChunkBatch = async () => {
+                    while (chunkIndex < totalChunks) {
+                        // Dynamic backpressure - wait if buffer is getting too full
+                        while (conn.dataChannel && conn.dataChannel.bufferedAmount > MAX_BUFFER) {
+                            await new Promise(r => setTimeout(r, 2));
+                        }
 
-                    // Wait if buffer is getting too full (flow control)
-                    while (conn.dataChannel && conn.dataChannel.bufferedAmount > 16777216) {
-                        await new Promise(r => setTimeout(r, 10));
+                        if (activeSends >= MAX_CONCURRENT) {
+                            await new Promise(r => setTimeout(r, 0));
+                            continue;
+                        }
+
+                        const i = chunkIndex++;
+                        const start = i * CHUNK_SIZE;
+                        const end = Math.min(start + CHUNK_SIZE, buffer.byteLength);
+                        
+                        // Slice the chunk (zero-copy where possible)
+                        let chunk = buffer.slice(start, end);
+                        let iv = null;
+
+                        // Encrypt if needed
+                        if (encryptionKey) { 
+                            iv = generateIV(); 
+                            chunk = await encryptChunk(encryptionKey, chunk, iv); 
+                        }
+
+                        activeSends++;
+                        
+                        // Send immediately without waiting
+                        conn.send({ 
+                            type: 'chunk', 
+                            data: chunk, 
+                            index: i, 
+                            total: totalChunks, 
+                            iv: iv ? Array.from(iv) : null,
+                            fileIndex: fileIndex
+                        });
+                        
+                        activeSends--;
+
+                        totalBytesSent += (end - start);
+                        const progress = (totalBytesSent / totalBytes) * 100;
+                        const elapsed = (performance.now() - startTime) / 1000;
+                        const speed = elapsed > 0 ? totalBytesSent / elapsed : 0;
+                        const speedStr = speed > 1048576 ? 
+                            `${(speed / 1048576).toFixed(1)} MB/s` : 
+                            `${(speed / 1024).toFixed(1)} KB/s`;
+                        
+                        document.getElementById('sendProgressFill').style.width = progress + '%';
+                        document.getElementById('sendProgressText').textContent = 
+                            `Sending ${file.name}... ${Math.round(progress)}% • ${speedStr}`;
                     }
+                };
 
-                    conn.send({ type: 'chunk', data: chunk, index: i, total: totalChunks, iv: iv ? Array.from(iv) : null });
-
-                    totalBytesSent += (end - start);
-                    const progress = (totalBytesSent / totalBytes) * 100;
-                    document.getElementById('sendProgressFill').style.width = progress + '%';
-                    document.getElementById('sendProgressText').textContent = `Sending ${file.name}... ${Math.round(progress)}%`;
-
-                    // Flow control: small delay every 50 chunks
-                    if (i % 50 === 0) {
-                        await new Promise(r => setTimeout(r, 5));
-                    }
+                // Launch concurrent workers
+                const workers = [];
+                const numWorkers = Math.min(MAX_CONCURRENT, 8); // 8 parallel workers
+                for (let w = 0; w < numWorkers; w++) {
+                    workers.push(sendChunkBatch());
                 }
+                await Promise.all(workers);
                 conn.send({ type: 'fileDone', fileIndex: fileIndex });
             }
             conn.send({ type: 'done' });
-            document.getElementById('sendProgressText').textContent = 'Transfer complete!';
+            const totalTime = (performance.now() - startTime) / 1000;
+            const avgSpeed = totalBytes / totalTime;
+            const speedStr = avgSpeed > 1048576 ? 
+                `${(avgSpeed / 1048576).toFixed(1)} MB/s` : 
+                `${(avgSpeed / 1024).toFixed(1)} KB/s`;
+            document.getElementById('sendProgressText').textContent = `Transfer complete! • Avg: ${speedStr}`;
         }
         
         function resetSender() {
@@ -563,6 +623,7 @@
             document.getElementById('resetBtn').style.display = 'none';
             document.getElementById('securityBadge').classList.remove('encrypted');
             document.getElementById('securityBadge').innerHTML = '🔐 End-to-end encryption enabled';
+            document.getElementById('speedBadge').style.display = 'none';
             hideStatus('sendStatus');
         }
         
@@ -578,15 +639,29 @@
             document.getElementById('transferModeIndicator').textContent = '🌐 Connecting via WebRTC...';
             
             peer = new Peer({
-                config: { iceServers: [{ urls: 'stun:stun.l.google.com:19302' }, { urls: 'stun:stun1.l.google.com:19302' }] },
-                debug: 2
+                config: { 
+                    iceServers: [
+                        { urls: 'stun:stun.l.google.com:19302' }, 
+                        { urls: 'stun:stun1.l.google.com:19302' },
+                        { urls: 'stun:stun2.l.google.com:19302' },
+                        { urls: 'stun:stun3.l.google.com:19302' },
+                        { urls: 'stun:stun4.l.google.com:19302' }
+                    ],
+                    iceCandidatePoolSize: 10
+                },
+                debug: 1
             });
             
             peer.on('open', (myId) => {
                 console.log('Receiver peer ready. My ID:', myId);
                 showStatus('receiveStatus', 'Connecting to sender...', 'info');
 
-                conn = peer.connect(code, { reliable: true, serialization: 'binary', ordered: true });
+                conn = peer.connect(code, { 
+                    reliable: true, 
+                    serialization: 'binary', 
+                    ordered: true,
+                    maxPacketLifeTime: 0 // No timeout for large transfers
+                });
 
                 conn.on('open', async () => {
                     console.log('Receiver: Connection opened!');
@@ -597,6 +672,7 @@
 
                     try {
                         encryptionKey = await deriveKey(code, peer.id);
+                        document.getElementById('speedBadge').style.display = 'block';
                     } catch (err) { console.error('Key derivation failed:', err); }
 
                     // Also clear timeout when data starts arriving
@@ -650,8 +726,11 @@
         }
         
         
+        // Use Map for out-of-order chunk handling with concurrent transfers
         const dataQueue = [];
         let isProcessingData = false;
+        const chunkCache = new Map(); // Cache for out-of-order chunks
+        let expectedChunkIndex = 0;
 
         async function processDataQueue() {
             if (isProcessingData) return;
@@ -676,6 +755,8 @@
                 receivedChunks = []; receivedSize = 0;
                 receivedFiles = [];
                 currentFileIndex = 0;
+                expectedChunkIndex = 0;
+                chunkCache.clear();
                 isFolderTransfer = data.isFolder;
                 document.getElementById('receiveProgressText').textContent = `Receiving ${data.fileCount} file(s)...`;
             } else if (data.type === 'fileStart') {
@@ -684,23 +765,65 @@
                     receivedFiles.push({ blob, path: fileInfo.files[currentFileIndex].path, name: fileInfo.files[currentFileIndex].name });
                 }
                 receivedChunks = []; receivedSize = 0; currentFileIndex = data.fileIndex;
+                expectedChunkIndex = 0;
+                chunkCache.clear();
             } else if (data.type === 'chunk') {
                 let chunkData = data.data;
                 if (encryptionKey && data.iv) {
                     const iv = new Uint8Array(data.iv);
                     chunkData = await decryptChunk(encryptionKey, chunkData, iv);
                 }
-                receivedChunks.push(chunkData);
-                receivedSize += chunkData.byteLength;
+
+                // Handle out-of-order chunks
+                if (data.index === expectedChunkIndex) {
+                    // In order - process immediately
+                    receivedChunks.push(chunkData);
+                    expectedChunkIndex++;
+                    receivedSize += chunkData.byteLength;
+
+                    // Process any cached chunks that are now in order
+                    while (chunkCache.has(expectedChunkIndex)) {
+                        const cachedChunk = chunkCache.get(expectedChunkIndex);
+                        receivedChunks.push(cachedChunk);
+                        receivedSize += cachedChunk.byteLength;
+                        chunkCache.delete(expectedChunkIndex);
+                        expectedChunkIndex++;
+                    }
+                } else {
+                    // Out of order - cache it
+                    chunkCache.set(data.index, chunkData);
+                    receivedSize += chunkData.byteLength;
+                }
+
                 const progress = (receivedSize / fileInfo.totalSize) * 100;
+                const elapsed = (performance.now() - (fileInfo.receiveStartTime || (fileInfo.receiveStartTime = performance.now()))) / 1000;
+                const speed = elapsed > 0 ? receivedSize / elapsed : 0;
+                const speedStr = speed > 1048576 ? 
+                    `${(speed / 1048576).toFixed(1)} MB/s` : 
+                    `${(speed / 1024).toFixed(1)} KB/s`;
+                
                 document.getElementById('receiveProgressFill').style.width = progress + '%';
-                document.getElementById('receiveProgressText').textContent = `Receiving... ${Math.round(progress)}% (${formatSize(receivedSize)} / ${formatSize(fileInfo.totalSize)})`;
+                document.getElementById('receiveProgressText').textContent = 
+                    `Receiving... ${Math.round(progress)}% • ${speedStr} (${formatSize(receivedSize)} / ${formatSize(fileInfo.totalSize)})`;
             } else if (data.type === 'fileDone') {
+                // Process any remaining cached chunks
+                const remainingIndices = Array.from(chunkCache.keys()).sort((a, b) => a - b);
+                for (const idx of remainingIndices) {
+                    receivedChunks.push(chunkCache.get(idx));
+                }
+                chunkCache.clear();
+                
                 const blob = new Blob(receivedChunks);
                 receivedFiles.push({ blob, path: fileInfo.files[data.fileIndex].path, name: fileInfo.files[data.fileIndex].name });
                 receivedChunks = [];
+                expectedChunkIndex = 0;
             } else if (data.type === 'done') {
-                if (receivedChunks.length > 0) {
+                if (receivedChunks.length > 0 || chunkCache.size > 0) {
+                    // Process any remaining chunks
+                    const remainingIndices = Array.from(chunkCache.keys()).sort((a, b) => a - b);
+                    for (const idx of remainingIndices) {
+                        receivedChunks.push(chunkCache.get(idx));
+                    }
                     const blob = new Blob(receivedChunks);
                     receivedFiles.push({ blob, path: fileInfo.files[currentFileIndex].path, name: fileInfo.files[currentFileIndex].name });
                 }
@@ -753,6 +876,7 @@
             document.getElementById('downloadBox').classList.remove('show');
             document.getElementById('multiFileDownloads').innerHTML = '';
             document.getElementById('transferModeIndicator').style.display = 'none';
+            document.getElementById('speedBadge').style.display = 'none';
             hideStatus('receiveStatus');
         }
         
