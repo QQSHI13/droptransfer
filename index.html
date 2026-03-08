@@ -182,9 +182,10 @@
             <div class="drop-zone" id="dropZone">
                 <div class="icon">📤</div>
                 <p>Drop files or folders here<br>or click to browse</p>
-                <p class="hint">Supports multiple files and entire folders</p>
+                <p class="hint">Click to select files • Right-click to select folder</p>
             </div>
-            <input type="file" id="fileInput" multiple webkitdirectory>
+            <input type="file" id="fileInput" multiple>
+            <input type="file" id="folderInput" webkitdirectory directory style="display: none;">
             
             <div class="file-list" id="fileList"></div>
             
@@ -328,8 +329,15 @@
         
         const dropZone = document.getElementById('dropZone');
         const fileInput = document.getElementById('fileInput');
-        
+        const folderInput = document.getElementById('folderInput');
+
         dropZone.addEventListener('click', () => fileInput.click());
+
+        // Handle folder selection via right-click
+        dropZone.addEventListener('contextmenu', (e) => {
+            e.preventDefault();
+            folderInput.click();
+        });
         dropZone.addEventListener('dragover', (e) => { e.preventDefault(); dropZone.classList.add('dragover'); });
         dropZone.addEventListener('dragleave', () => dropZone.classList.remove('dragover'));
         dropZone.addEventListener('drop', async (e) => {
@@ -358,6 +366,20 @@
             currentFiles = []; isFolderTransfer = false;
             for (const file of files) {
                 currentFiles.push({ file: file, path: file.name, relativePath: file.webkitRelativePath || file.name });
+            }
+            displayFileList();
+            if (sendMode === 'direct') initSender(); else initTorrentSender();
+        });
+
+        // Handle folder selection
+        folderInput.addEventListener('change', async (e) => {
+            const files = Array.from(e.target.files);
+            if (files.length === 0) return;
+            currentFiles = []; isFolderTransfer = true;
+            for (const file of files) {
+                // webkitRelativePath contains the folder structure
+                const relativePath = file.webkitRelativePath || file.name;
+                currentFiles.push({ file: file, path: relativePath, relativePath: relativePath });
             }
             displayFileList();
             if (sendMode === 'direct') initSender(); else initTorrentSender();
@@ -568,6 +590,7 @@
 
                 conn.on('open', async () => {
                     console.log('Receiver: Connection opened!');
+                    clearTimeout(connectionTimeout);
                     showStatus('receiveStatus', 'Connected! Waiting for file...', 'success');
                     document.getElementById('transferModeIndicator').textContent = '🔒 Encrypted WebRTC connection';
                     document.getElementById('receiveProgress').classList.add('show');
@@ -575,6 +598,13 @@
                     try {
                         encryptionKey = await deriveKey(code, peer.id);
                     } catch (err) { console.error('Key derivation failed:', err); }
+
+                    // Also clear timeout when data starts arriving
+                    const clearOnData = () => {
+                        clearTimeout(connectionTimeout);
+                        conn.off('data', clearOnData);
+                    };
+                    conn.on('data', clearOnData);
                 });
 
                 conn.on('data', (data) => handleData(data));
@@ -601,6 +631,7 @@
                 document.getElementById('retryBtn').style.display = 'block';
             });
             
+            // Connection timeout - will be cleared when data starts arriving
             let connectionTimeout = setTimeout(() => {
                 if (!conn || !conn.open) {
                     showStatus('receiveStatus', 'Connection timeout. Try WebTorrent mode.', 'error');
@@ -611,6 +642,11 @@
                     if (conn) conn.close(); if (peer) peer.destroy();
                 }
             }, 20000);
+
+            // Clear timeout when connection opens successfully
+            conn.on('open', () => {
+                clearTimeout(connectionTimeout);
+            });
         }
         
         
