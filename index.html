@@ -441,14 +441,18 @@
             peer.on('connection', async (connection) => {
                 console.log('Incoming connection from:', connection.peer);
                 document.getElementById('connectionWaiting').style.display = 'none';
+
+                // Use the incoming connection directly instead of creating a new outgoing connection
                 conn = connection;
+
                 try {
                     encryptionKey = await deriveKey(peer.id, connection.peer);
                     document.getElementById('securityBadge').classList.add('encrypted');
                     document.getElementById('securityBadge').innerHTML = '🔒 Encrypted connection established';
                 } catch (err) { console.error('Key derivation failed:', err); }
-                
-                conn.on('open', () => { console.log('Sender: Connection fully opened'); handleConnection(); });
+
+                console.log('Sender: Connection established');
+                handleConnection();
             });
             
             peer.on('error', (err) => {
@@ -460,15 +464,19 @@
         function handleConnection() {
             console.log('Setting up connection handlers');
             showStatus('sendStatus', 'Receiver connected! Sending file(s)...', 'info');
-            sendFiles();
-            
+
+            // Set up data handler first before sending
             conn.on('data', (data) => {
+                console.log('Sender received data:', data);
                 if (data === 'received') {
                     showStatus('sendStatus', 'File(s) sent successfully!', 'success');
                     document.getElementById('resetBtn').style.display = 'block';
                 }
             });
             conn.on('error', (err) => { console.error('Connection error:', err); showStatus('sendStatus', 'Transfer error: ' + err.message, 'error'); });
+
+            // Start sending after a short delay to ensure receiver is ready
+            setTimeout(() => sendFiles(), 500);
         }
         
         async function sendFiles() {
@@ -489,22 +497,31 @@
                 const totalChunks = Math.ceil(buffer.byteLength / CHUNK_SIZE);
                 
                 conn.send({ type: 'fileStart', fileIndex: fileIndex, path: path, name: file.name });
-                
+
                 for (let i = 0; i < totalChunks; i++) {
                     const start = i * CHUNK_SIZE;
                     const end = Math.min(start + CHUNK_SIZE, buffer.byteLength);
                     let chunk = buffer.slice(start, end);
                     let iv = null;
-                    
+
                     if (encryptionKey) { iv = generateIV(); chunk = await encryptChunk(encryptionKey, chunk, iv); }
-                    
+
+                    // Wait if buffer is getting too full (flow control)
+                    while (conn.dataChannel && conn.dataChannel.bufferedAmount > 16777216) {
+                        await new Promise(r => setTimeout(r, 10));
+                    }
+
                     conn.send({ type: 'chunk', data: chunk, index: i, total: totalChunks, iv: iv ? Array.from(iv) : null });
-                    
+
                     totalBytesSent += (end - start);
                     const progress = (totalBytesSent / totalBytes) * 100;
                     document.getElementById('sendProgressFill').style.width = progress + '%';
                     document.getElementById('sendProgressText').textContent = `Sending ${file.name}... ${Math.round(progress)}%`;
-                    await new Promise(r => setTimeout(r, 5));
+
+                    // Flow control: small delay every 50 chunks
+                    if (i % 50 === 0) {
+                        await new Promise(r => setTimeout(r, 5));
+                    }
                 }
                 conn.send({ type: 'fileDone', fileIndex: fileIndex });
             }
@@ -546,10 +563,27 @@
             peer.on('open', (myId) => {
                 console.log('Receiver peer ready. My ID:', myId);
                 showStatus('receiveStatus', 'Connecting to sender...', 'info');
-                setTimeout(() => {
-                    conn = peer.connect(code, { reliable: true, serialization: 'binary' });
-                    setupConnectionHandlers(code);
-                }, 500);
+
+                conn = peer.connect(code, { reliable: true, serialization: 'binary', ordered: true });
+
+                conn.on('open', async () => {
+                    console.log('Receiver: Connection opened!');
+                    showStatus('receiveStatus', 'Connected! Waiting for file...', 'success');
+                    document.getElementById('transferModeIndicator').textContent = '🔒 Encrypted WebRTC connection';
+                    document.getElementById('receiveProgress').classList.add('show');
+
+                    try {
+                        encryptionKey = await deriveKey(code, peer.id);
+                    } catch (err) { console.error('Key derivation failed:', err); }
+                });
+
+                conn.on('data', (data) => handleData(data));
+                conn.on('error', (err) => {
+                    console.error('Connection error:', err);
+                    showStatus('receiveStatus', 'Connection error: ' + err.message, 'error');
+                    document.getElementById('connectBtn').disabled = false;
+                });
+                conn.on('close', () => console.log('Connection closed'));
             });
             
             peer.on('error', (err) => {
@@ -579,23 +613,28 @@
             }, 20000);
         }
         
-        async function setupConnectionHandlers(senderId) {
-            conn.on('open', async () => {
-                console.log('Receiver: Connection opened!');
-                document.getElementById('transferModeIndicator').textContent = '🔒 Encrypted WebRTC connection';
-                showStatus('receiveStatus', 'Connected! Waiting for file...', 'success');
-                document.getElementById('receiveProgress').classList.add('show');
-                try {
-                    encryptionKey = await deriveKey(senderId, peer.id);
-                } catch (err) { console.error('Key derivation failed:', err); }
-            });
-            
-            conn.on('data', (data) => handleData(data));
-            conn.on('error', (err) => { console.error('Connection error:', err); showStatus('receiveStatus', 'Connection error: ' + err.message, 'error'); document.getElementById('connectBtn').disabled = false; });
-            conn.on('close', () => console.log('Connection closed'));
-        }
         
-        async function handleData(data) {
+        const dataQueue = [];
+        let isProcessingData = false;
+
+        async function processDataQueue() {
+            if (isProcessingData) return;
+            isProcessingData = true;
+
+            while (dataQueue.length > 0) {
+                const data = dataQueue.shift();
+                await handleDataInternal(data);
+            }
+
+            isProcessingData = false;
+        }
+
+        function handleData(data) {
+            dataQueue.push(data);
+            processDataQueue();
+        }
+
+        async function handleDataInternal(data) {
             if (data.type === 'metadata') {
                 fileInfo = data;
                 receivedChunks = []; receivedSize = 0;
