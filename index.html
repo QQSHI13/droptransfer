@@ -169,8 +169,8 @@
         <div class="speed-badge" id="speedBadge" style="display: none; text-align: center; color: var(--success); font-size: 0.8rem; margin-bottom: 12px;">⚡ High-speed transfer active</div>
         
         <div class="tabs">
-            <button class="tab active" onclick="switchTab('send')">Send</button>
-            <button class="tab" onclick="switchTab('receive')">Receive</button>
+            <button class="tab active" onclick="switchTab('send', this)">Send</button>
+            <button class="tab" onclick="switchTab('receive', this)">Receive</button>
         </div>
         
         <!-- Send Tab -->
@@ -277,11 +277,12 @@
         let receivedSize = 0, fileInfo = null, encryptionKey = null;
         let sendMode = 'direct', recvMode = 'direct', client = null;
         let isFolderTransfer = false, currentFileIndex = 0, receivedFiles = [];
+        let objectURLs = []; // Track created object URLs for cleanup
         
-        function switchTab(tab) {
+        function switchTab(tab, clickedBtn) {
             document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
             document.querySelectorAll('.tab-content').forEach(c => c.classList.remove('active'));
-            event.target.classList.add('active');
+            clickedBtn.classList.add('active');
             document.getElementById(tab + '-tab').classList.add('active');
         }
         
@@ -552,74 +553,71 @@
                 
                 conn.send({ type: 'fileStart', fileIndex: fileIndex, path: path, name: file.name, totalChunks: totalChunks });
 
-                // Optimized concurrent chunk sending for maximum throughput
-                const MAX_CONCURRENT = 32; // High concurrency for maximum throughput
-                const MAX_BUFFER = 134217728; // 128MB buffer threshold
+                // Optimized concurrent chunk sending with proper backpressure
+                const MAX_BUFFER = 16777216; // 16MB buffer threshold to prevent memory issues
                 let chunkIndex = 0;
-                let activeSends = 0;
-                const chunkPromises = [];
+                let totalBytesSentForFile = 0;
+                const pendingChunks = new Map(); // Track in-flight chunks
+                
+                const sendNextChunk = async () => {
+                    const i = chunkIndex++;
+                    const start = i * CHUNK_SIZE;
+                    const end = Math.min(start + CHUNK_SIZE, buffer.byteLength);
+                    
+                    // Slice the chunk
+                    let chunk = buffer.slice(start, end);
+                    let iv = null;
 
-                const sendChunkBatch = async () => {
-                    while (chunkIndex < totalChunks) {
-                        // Dynamic backpressure - wait if buffer is getting too full
-                        while (conn.dataChannel && conn.dataChannel.bufferedAmount > MAX_BUFFER) {
-                            await new Promise(r => setTimeout(r, 2));
-                        }
-
-                        if (activeSends >= MAX_CONCURRENT) {
-                            await new Promise(r => setTimeout(r, 0));
-                            continue;
-                        }
-
-                        const i = chunkIndex++;
-                        const start = i * CHUNK_SIZE;
-                        const end = Math.min(start + CHUNK_SIZE, buffer.byteLength);
-                        
-                        // Slice the chunk (zero-copy where possible)
-                        let chunk = buffer.slice(start, end);
-                        let iv = null;
-
-                        // Encrypt if needed
-                        if (encryptionKey) { 
-                            iv = generateIV(); 
-                            chunk = await encryptChunk(encryptionKey, chunk, iv); 
-                        }
-
-                        activeSends++;
-                        
-                        // Send immediately without waiting
-                        conn.send({ 
-                            type: 'chunk', 
-                            data: chunk, 
-                            index: i, 
-                            total: totalChunks, 
-                            iv: iv ? Array.from(iv) : null,
-                            fileIndex: fileIndex
-                        });
-                        
-                        activeSends--;
-
-                        totalBytesSent += (end - start);
-                        const progress = (totalBytesSent / totalBytes) * 100;
-                        const elapsed = (performance.now() - startTime) / 1000;
-                        const speed = elapsed > 0 ? totalBytesSent / elapsed : 0;
-                        const speedStr = speed > 1048576 ? 
-                            `${(speed / 1048576).toFixed(1)} MB/s` : 
-                            `${(speed / 1024).toFixed(1)} KB/s`;
-                        
-                        document.getElementById('sendProgressFill').style.width = progress + '%';
-                        document.getElementById('sendProgressText').textContent = 
-                            `Sending ${file.name}... ${Math.round(progress)}% • ${speedStr}`;
+                    // Encrypt if needed
+                    if (encryptionKey) { 
+                        iv = generateIV(); 
+                        chunk = await encryptChunk(encryptionKey, chunk, iv); 
                     }
+
+                    // Track this chunk as in-flight
+                    const chunkSize = end - start;
+                    pendingChunks.set(i, chunkSize);
+
+                    // Send the chunk
+                    conn.send({ 
+                        type: 'chunk', 
+                        data: chunk, 
+                        index: i, 
+                        total: totalChunks, 
+                        iv: iv ? Array.from(iv) : null,
+                        fileIndex: fileIndex
+                    });
+                    
+                    totalBytesSent += chunkSize;
+                    totalBytesSentForFile += chunkSize;
+                    pendingChunks.delete(i);
+                    
+                    const progress = (totalBytesSent / totalBytes) * 100;
+                    const elapsed = (performance.now() - startTime) / 1000;
+                    const speed = elapsed > 0 ? totalBytesSent / elapsed : 0;
+                    const speedStr = speed > 1048576 ? 
+                        `${(speed / 1048576).toFixed(1)} MB/s` : 
+                        `${(speed / 1024).toFixed(1)} KB/s`;
+                    
+                    document.getElementById('sendProgressFill').style.width = progress + '%';
+                    document.getElementById('sendProgressText').textContent = 
+                        `Sending ${file.name}... ${Math.round(progress)}% • ${speedStr}`;
                 };
 
-                // Launch concurrent workers
-                const workers = [];
-                const numWorkers = Math.min(MAX_CONCURRENT, 8); // 8 parallel workers
-                for (let w = 0; w < numWorkers; w++) {
-                    workers.push(sendChunkBatch());
+                // Process chunks with proper backpressure control
+                while (chunkIndex < totalChunks) {
+                    // Wait if buffer is getting too full
+                    while (conn.dataChannel && conn.dataChannel.bufferedAmount > MAX_BUFFER) {
+                        await new Promise(r => setTimeout(r, 5));
+                    }
+                    
+                    await sendNextChunk();
                 }
-                await Promise.all(workers);
+                
+                // Wait for any remaining buffered data to be sent
+                while (conn.dataChannel && conn.dataChannel.bufferedAmount > 0) {
+                    await new Promise(r => setTimeout(r, 10));
+                }
                 conn.send({ type: 'fileDone', fileIndex: fileIndex });
             }
             conn.send({ type: 'done' });
@@ -631,12 +629,27 @@
             document.getElementById('sendProgressText').textContent = `Transfer complete! • Avg: ${speedStr}`;
         }
         
+        function cleanupObjectURLs() {
+            objectURLs.forEach(url => URL.revokeObjectURL(url));
+            objectURLs = [];
+        }
+
         function resetSender() {
             if (conn) conn.close();
             if (peer) peer.destroy();
+            
+            // Cleanup torrents and their listeners
+            activeTorrents.forEach(torrent => {
+                if (torrent._cleanup) torrent._cleanup();
+                torrent.destroy();
+            });
+            activeTorrents = [];
+            
             conn = null; peer = null; currentFiles = []; encryptionKey = null;
+            cleanupObjectURLs();
             document.getElementById('fileList').innerHTML = '';
             document.getElementById('codeBox').classList.remove('show');
+            document.getElementById('magnetBox').classList.remove('show');
             document.getElementById('sendProgress').classList.remove('show');
             document.getElementById('sendProgressFill').style.width = '0%';
             document.getElementById('sendProgressText').textContent = '';
@@ -644,6 +657,7 @@
             document.getElementById('securityBadge').classList.remove('encrypted');
             document.getElementById('securityBadge').innerHTML = '🔐 End-to-end encryption enabled';
             document.getElementById('speedBadge').style.display = 'none';
+            document.getElementById('connectionWaiting').style.display = 'none';
             hideStatus('sendStatus');
         }
         
@@ -657,6 +671,9 @@
             document.getElementById('transferModeIndicator').style.display = 'flex';
             document.getElementById('transferModeIndicator').className = 'transfer-mode-indicator webrtc';
             document.getElementById('transferModeIndicator').textContent = '🌐 Connecting via WebRTC...';
+            
+            let connectionTimeout = null;
+            let hasReceivedData = false;
             
             peer = new Peer({
                 config: { 
@@ -685,7 +702,7 @@
 
                 conn.on('open', async () => {
                     console.log('Receiver: Connection opened!');
-                    clearTimeout(connectionTimeout);
+                    if (connectionTimeout) clearTimeout(connectionTimeout);
                     showStatus('receiveStatus', 'Connected! Waiting for file...', 'success');
                     document.getElementById('transferModeIndicator').textContent = '🔒 Encrypted WebRTC connection';
                     document.getElementById('receiveProgress').classList.add('show');
@@ -694,26 +711,30 @@
                         encryptionKey = await deriveKey(code, peer.id);
                         document.getElementById('speedBadge').style.display = 'block';
                     } catch (err) { console.error('Key derivation failed:', err); }
-
-                    // Also clear timeout when data starts arriving
-                    const clearOnData = () => {
-                        clearTimeout(connectionTimeout);
-                        conn.off('data', clearOnData);
-                    };
-                    conn.on('data', clearOnData);
                 });
 
-                conn.on('data', (data) => handleData(data));
+                conn.on('data', (data) => {
+                    // Clear timeout on first data received
+                    if (!hasReceivedData) {
+                        hasReceivedData = true;
+                        if (connectionTimeout) clearTimeout(connectionTimeout);
+                    }
+                    handleData(data);
+                });
+                
                 conn.on('error', (err) => {
                     console.error('Connection error:', err);
                     showStatus('receiveStatus', 'Connection error: ' + err.message, 'error');
                     document.getElementById('connectBtn').disabled = false;
                 });
+                
                 conn.on('close', () => console.log('Connection closed'));
             });
             
             peer.on('error', (err) => {
                 console.error('Peer error:', err);
+                if (connectionTimeout) clearTimeout(connectionTimeout);
+                
                 let msg = 'Connection failed';
                 if (err.type === 'peer-unavailable') msg = 'Sender not found. Check the code or try WebTorrent mode.';
                 else if (err.type === 'network') msg = 'Network error. Check your connection.';
@@ -727,9 +748,9 @@
                 document.getElementById('retryBtn').style.display = 'block';
             });
             
-            // Connection timeout - will be cleared when data starts arriving
-            let connectionTimeout = setTimeout(() => {
-                if (!conn || !conn.open) {
+            // Connection timeout - will be cleared when connection opens or data arrives
+            connectionTimeout = setTimeout(() => {
+                if (!conn || !conn.open || !hasReceivedData) {
                     showStatus('receiveStatus', 'Connection timeout. Try WebTorrent mode.', 'error');
                     document.getElementById('transferModeIndicator').className = 'transfer-mode-indicator webtorrent';
                     document.getElementById('transferModeIndicator').innerHTML = '⚠️ WebRTC timeout. <a href="#" onclick="setRecvMode(\'torrent\')" style="color: var(--accent);">Try WebTorrent</a>';
@@ -738,11 +759,6 @@
                     if (conn) conn.close(); if (peer) peer.destroy();
                 }
             }, 20000);
-
-            // Clear timeout when connection opens successfully
-            conn.on('open', () => {
-                clearTimeout(connectionTimeout);
-            });
         }
         
         
@@ -790,8 +806,14 @@
             } else if (data.type === 'chunk') {
                 let chunkData = data.data;
                 if (encryptionKey && data.iv) {
-                    const iv = new Uint8Array(data.iv);
-                    chunkData = await decryptChunk(encryptionKey, chunkData, iv);
+                    try {
+                        const iv = new Uint8Array(data.iv);
+                        chunkData = await decryptChunk(encryptionKey, chunkData, iv);
+                    } catch (err) {
+                        console.error('Decryption failed:', err);
+                        showStatus('receiveStatus', 'Decryption error: file may be corrupted', 'error');
+                        return;
+                    }
                 }
 
                 // Handle out-of-order chunks
@@ -838,25 +860,41 @@
                 receivedChunks = [];
                 expectedChunkIndex = 0;
             } else if (data.type === 'done') {
-                if (receivedChunks.length > 0 || chunkCache.size > 0) {
-                    // Process any remaining chunks
+                // Check for missing chunks
+                const expectedTotalChunks = fileInfo.files.reduce((sum, f) => sum + Math.ceil(f.size / CHUNK_SIZE), 0);
+                const receivedTotalChunks = receivedChunks.length + chunkCache.size;
+                
+                if (chunkCache.size > 0) {
+                    // Process remaining cached chunks
                     const remainingIndices = Array.from(chunkCache.keys()).sort((a, b) => a - b);
                     for (const idx of remainingIndices) {
                         receivedChunks.push(chunkCache.get(idx));
                     }
+                }
+                
+                if (receivedChunks.length > 0) {
                     const blob = new Blob(receivedChunks);
                     receivedFiles.push({ blob, path: fileInfo.files[currentFileIndex].path, name: fileInfo.files[currentFileIndex].name });
                 }
+                
+                // Warn if chunks are missing
+                if (chunkCache.size > 0 || receivedTotalChunks < expectedTotalChunks) {
+                    console.warn(`Missing chunks detected. Expected: ${expectedTotalChunks}, Received: ${receivedTotalChunks}`);
+                    showStatus('receiveStatus', 'Warning: Some data may be missing. File could be corrupted.', 'warning');
+                }
+                
                 finalizeTransfer();
             }
         }
         
         function finalizeTransfer() {
             document.getElementById('receiveProgress').classList.remove('show');
+            cleanupObjectURLs(); // Clean up previous URLs
             
             if (receivedFiles.length === 1) {
                 const file = receivedFiles[0];
                 const url = URL.createObjectURL(file.blob);
+                objectURLs.push(url);
                 const downloadLink = document.getElementById('downloadLink');
                 downloadLink.href = url;
                 downloadLink.download = file.name;
@@ -867,6 +905,7 @@
                 multiFileDiv.innerHTML = '<div style="margin-top: 16px; font-weight: 600;">Received Files:</div>';
                 receivedFiles.forEach((file, idx) => {
                     const url = URL.createObjectURL(file.blob);
+                    objectURLs.push(url);
                     const btn = document.createElement('a');
                     btn.href = url;
                     btn.download = file.name;
@@ -886,13 +925,16 @@
         function resetReceiver() {
             if (conn) conn.close(); if (peer) peer.destroy();
             conn = null; peer = null; encryptionKey = null; receivedFiles = [];
+            cleanupObjectURLs();
             document.getElementById('codeInput').value = '';
             document.getElementById('magnetInput').value = '';
             document.getElementById('connectBtn').style.display = 'block';
             document.getElementById('connectBtn').disabled = false;
+            document.getElementById('torrentBtn').disabled = false;
             document.getElementById('retryBtn').style.display = 'none';
             document.getElementById('receiveProgress').classList.remove('show');
             document.getElementById('receiveProgressFill').style.width = '0%';
+            document.getElementById('receiveProgressText').textContent = '';
             document.getElementById('downloadBox').classList.remove('show');
             document.getElementById('multiFileDownloads').innerHTML = '';
             document.getElementById('transferModeIndicator').style.display = 'none';
@@ -901,6 +943,8 @@
         }
         
         // ==================== WEBTORRENT ====================
+        let activeTorrents = [];
+        
         function initTorrentSender() {
             if (!client) client = new WebTorrent();
             
@@ -909,14 +953,24 @@
             
             client.seed(files, { name: isFolderTransfer ? 'DropTransfer' : files[0].name }, (torrent) => {
                 console.log('Seeding:', torrent.magnetURI);
+                activeTorrents.push(torrent);
                 document.getElementById('magnetLink').textContent = torrent.magnetURI;
                 document.getElementById('magnetBox').classList.add('show');
                 showStatus('sendStatus', 'Torrent ready! Share the magnet link.', 'success');
                 
-                torrent.on('upload', (bytes) => {
-                    document.getElementById('sendProgressFill').style.width = '100%';
-                    document.getElementById('sendProgressText').textContent = `Uploading... ${formatSize(torrent.uploaded)} uploaded`;
-                });
+                const updateUpload = (bytes) => {
+                    if (document.getElementById('sendProgressFill')) {
+                        document.getElementById('sendProgressFill').style.width = '100%';
+                        document.getElementById('sendProgressText').textContent = `Uploading... ${formatSize(torrent.uploaded)} uploaded`;
+                    }
+                };
+                
+                torrent.on('upload', updateUpload);
+                
+                // Store cleanup function on torrent for later
+                torrent._cleanup = () => {
+                    torrent.off('upload', updateUpload);
+                };
                 
                 document.getElementById('sendProgress').classList.add('show');
                 document.getElementById('resetBtn').style.display = 'block';
@@ -959,8 +1013,13 @@
                     
                     torrent.files.forEach(file => {
                         file.getBlob((err, blob) => {
-                            if (err) return;
+                            if (err) {
+                                console.error('Error getting blob:', err);
+                                showStatus('receiveStatus', `Error processing ${file.name}: ${err.message}`, 'error');
+                                return;
+                            }
                             const url = URL.createObjectURL(blob);
+                            objectURLs.push(url);
                             const btn = document.createElement('a');
                             btn.href = url;
                             btn.download = file.name;
