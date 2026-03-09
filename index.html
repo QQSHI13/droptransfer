@@ -1080,27 +1080,14 @@
             document.getElementById('receiveProgress').classList.remove('show');
             cleanupObjectURLs(); // Clean up previous URLs
             
-            // Check if we received a zip file that needs extraction
-            if (fileInfo && fileInfo.isZipped && receivedFiles.length === 1) {
-                const zipFile = receivedFiles[0];
-                if (zipFile.name.endsWith('.zip')) {
-                    try {
-                        showStatus('receiveStatus', 'Extracting files from archive...', 'info');
-                        const extractedFiles = await extractZip(zipFile.blob, zipFile.name);
-                        
-                        // Replace receivedFiles with extracted files
-                        receivedFiles = extractedFiles.map(f => ({
-                            blob: f.blob,
-                            path: f.path,
-                            name: f.name
-                        }));
-                        
-                        showStatus('receiveStatus', `Extracted ${extractedFiles.length} files!`, 'success');
-                    } catch (err) {
-                        console.error('Failed to extract zip:', err);
-                        showStatus('receiveStatus', 'Failed to extract zip: ' + err.message, 'error');
-                        // Still show the zip file as download option
-                    }
+            // Keep folders as zip files - don't auto-extract
+            // Show appropriate message based on what was received
+            let statusMsg = 'File received! Click download below.';
+            if (fileInfo && fileInfo.isZipped) {
+                if (fileInfo.isFolder) {
+                    statusMsg = `Folder "${fileInfo.zipName.replace('.zip', '')}" received! Download the zip file below.`;
+                } else {
+                    statusMsg = `${fileInfo.originalFileCount} files received as archive! Download the zip file below.`;
                 }
             }
             
@@ -1112,7 +1099,7 @@
                 downloadLink.href = url;
                 downloadLink.download = file.name;
                 document.getElementById('downloadBox').classList.add('show');
-                showStatus('receiveStatus', 'File received! Click download below.', 'success');
+                showStatus('receiveStatus', statusMsg, 'success');
             } else {
                 const multiFileDiv = document.getElementById('multiFileDownloads');
                 multiFileDiv.innerHTML = '<div style="margin-top: 16px; font-weight: 600;">Received Files:</div>';
@@ -1301,88 +1288,42 @@
                         `Downloading... ${Math.round(progress)}% • ${formatSize(torrent.downloadSpeed)}/s • ${torrent.numPeers} peer(s)`;
                 });
                 
-                torrent.on('done', async () => {
+                torrent.on('done', () => {
                     console.log('Download complete');
                     document.getElementById('receiveProgress').classList.remove('show');
                     
                     const multiFileDiv = document.getElementById('multiFileDownloads');
                     multiFileDiv.innerHTML = '<div style="margin-top: 16px; font-weight: 600;">Downloaded Files:</div>';
                     
-                    // Check if downloaded file is a zip
-                    const isZipFile = torrent.files.length === 1 && torrent.files[0].name.endsWith('.zip');
-                    
-                    if (isZipFile) {
-                        // Extract zip file
-                        const zipFile = torrent.files[0];
-                        zipFile.getBlob(async (err, blob) => {
+                    // Show files as-is (don't auto-extract zips)
+                    torrent.files.forEach(file => {
+                        file.getBlob((err, blob) => {
                             if (err) {
                                 console.error('Error getting blob:', err);
-                                showStatus('receiveStatus', `Error processing ${zipFile.name}: ${err.message}`, 'error');
+                                showStatus('receiveStatus', `Error processing ${file.name}: ${err.message}`, 'error');
                                 return;
                             }
-                            
-                            try {
-                                showStatus('receiveStatus', 'Extracting files from archive...', 'info');
-                                const extractedFiles = await extractZip(blob, zipFile.name);
-                                
-                                extractedFiles.forEach(f => {
-                                    const url = URL.createObjectURL(f.blob);
-                                    objectURLs.push(url);
-                                    const btn = document.createElement('a');
-                                    btn.href = url;
-                                    btn.download = f.name;
-                                    btn.className = 'download-btn';
-                                    btn.style.marginTop = '8px';
-                                    btn.innerHTML = `⬇️ ${f.name} (${formatSize(f.size)})`;
-                                    multiFileDiv.appendChild(btn);
-                                });
-                                
-                                showStatus('receiveStatus', `Download complete! Extracted ${extractedFiles.length} files.`, 'success');
-                            } catch (extractErr) {
-                                console.error('Failed to extract zip:', extractErr);
-                                // Fall back to showing the zip file
-                                const url = URL.createObjectURL(blob);
-                                objectURLs.push(url);
-                                const btn = document.createElement('a');
-                                btn.href = url;
-                                btn.download = zipFile.name;
-                                btn.className = 'download-btn';
-                                btn.style.marginTop = '8px';
-                                btn.innerHTML = `⬇️ ${zipFile.name} (${formatSize(blob.size)}) - Extract failed, download zip`;
-                                multiFileDiv.appendChild(btn);
-                                showStatus('receiveStatus', 'Download complete! (Zip extraction failed)', 'warning');
-                            }
-                            
-                            document.getElementById('transferModeIndicator').textContent = '✅ WebTorrent download complete';
-                            document.getElementById('retryBtn').textContent = '🔄 Download Another File';
-                            document.getElementById('retryBtn').style.display = 'block';
+                            const url = URL.createObjectURL(blob);
+                            objectURLs.push(url);
+                            const btn = document.createElement('a');
+                            btn.href = url;
+                            btn.download = file.name;
+                            btn.className = 'download-btn';
+                            btn.style.marginTop = '8px';
+                            btn.innerHTML = `⬇️ ${file.name} (${formatSize(blob.size)})`;
+                            multiFileDiv.appendChild(btn);
                         });
-                    } else {
-                        // Regular file(s), show as-is
-                        torrent.files.forEach(file => {
-                            file.getBlob((err, blob) => {
-                                if (err) {
-                                    console.error('Error getting blob:', err);
-                                    showStatus('receiveStatus', `Error processing ${file.name}: ${err.message}`, 'error');
-                                    return;
-                                }
-                                const url = URL.createObjectURL(blob);
-                                objectURLs.push(url);
-                                const btn = document.createElement('a');
-                                btn.href = url;
-                                btn.download = file.name;
-                                btn.className = 'download-btn';
-                                btn.style.marginTop = '8px';
-                                btn.innerHTML = `⬇️ ${file.name} (${formatSize(blob.size)})`;
-                                multiFileDiv.appendChild(btn);
-                            });
-                        });
-                        
-                        showStatus('receiveStatus', 'Download complete!', 'success');
-                        document.getElementById('transferModeIndicator').textContent = '✅ WebTorrent download complete';
-                        document.getElementById('retryBtn').textContent = '🔄 Download Another File';
-                        document.getElementById('retryBtn').style.display = 'block';
-                    }
+                    });
+                    
+                    const isZipFile = torrent.files.length === 1 && torrent.files[0].name.endsWith('.zip');
+                    const statusMsg = isZipFile ? 
+                        `Download complete! Folder/archive received as zip file.` : 
+                        'Download complete!';
+                    
+                    showStatus('receiveStatus', statusMsg, 'success');
+                    document.getElementById('transferModeIndicator').textContent = '✅ WebTorrent download complete';
+                    document.getElementById('retryBtn').textContent = '🔄 Download Another File';
+                    document.getElementById('retryBtn').style.display = 'block';
                 });
             });
             
