@@ -279,6 +279,8 @@
         let isFolderTransfer = false, currentFileIndex = 0, receivedFiles = [];
         let objectURLs = []; // Track created object URLs for cleanup
         let pendingAcks = new Map(); // Track unacknowledged chunks
+        let isSending = false; // Guard against re-entrant sendFiles
+        let metadataReceived = false; // Guard against duplicate metadata
         
         function switchTab(tab, clickedBtn) {
             document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
@@ -562,14 +564,26 @@
             document.getElementById('resetBtn').disabled = true;
             
             let receiverReady = false;
+            isSending = false; // Reset sending flag for new connection
 
             // Set up data handler first before sending
             conn.on('data', async (data) => {
                 console.log('Sender received data:', data);
                 if (data === 'ready') {
+                    if (receiverReady || isSending) {
+                        console.log('Ignoring duplicate ready signal');
+                        return;
+                    }
                     receiverReady = true;
+                    isSending = true;
                     showStatus('sendStatus', 'Receiver ready! Sending file(s)...', 'info');
-                    await sendFiles();
+                    try {
+                        await sendFiles();
+                    } catch (err) {
+                        console.error('Send failed:', err);
+                        showStatus('sendStatus', 'Send failed: ' + err.message, 'error');
+                    }
+                    isSending = false;
                 } else if (data === 'received') {
                     showStatus('sendStatus', 'File(s) sent successfully!', 'success');
                     document.getElementById('resetBtn').disabled = false;
@@ -583,11 +597,13 @@
             conn.on('error', (err) => { 
                 console.error('Connection error:', err); 
                 showStatus('sendStatus', 'Transfer error: ' + err.message, 'error');
+                isSending = false;
                 document.getElementById('resetBtn').disabled = false;
             });
             
             conn.on('close', () => {
                 console.log('Connection closed');
+                isSending = false;
                 document.getElementById('resetBtn').disabled = false;
                 if (document.getElementById('sendStatus').textContent.includes('Sending')) {
                     showStatus('sendStatus', 'Connection closed unexpectedly', 'error');
@@ -615,11 +631,13 @@
                 
                 conn.send({ type: 'fileStart', fileIndex: fileIndex, path: path, name: file.name, totalChunks: totalChunks });
 
-                // Optimized concurrent chunk sending with proper backpressure
-                const MAX_BUFFER = 16777216; // 16MB buffer threshold to prevent memory issues
+                // Reset pending ACKs for this file
+                pendingAcks.clear();
+                
+                // Reliable chunk sending with backpressure
+                const MAX_BUFFER = 8388608; // 8MB buffer threshold
+                const MAX_IN_FLIGHT = 32; // Max chunks without acknowledgment
                 let chunkIndex = 0;
-                let totalBytesSentForFile = 0;
-                const pendingChunks = new Map(); // Track in-flight chunks
                 
                 const sendNextChunk = async () => {
                     const i = chunkIndex++;
@@ -632,13 +650,20 @@
 
                     // Encrypt if needed
                     if (encryptionKey) { 
-                        iv = generateIV(); 
-                        chunk = await encryptChunk(encryptionKey, chunk, iv); 
+                        try {
+                            iv = generateIV(); 
+                            chunk = await encryptChunk(encryptionKey, chunk, iv);
+                        } catch (err) {
+                            console.error('Encryption failed:', err);
+                            showStatus('sendStatus', 'Encryption error: ' + err.message, 'error');
+                            conn.close();
+                            return;
+                        }
                     }
 
-                    // Track this chunk as in-flight
-                    const chunkSize = end - start;
-                    pendingChunks.set(i, chunkSize);
+                    // Track this chunk for acknowledgment
+                    const chunkKey = i + '-' + fileIndex;
+                    pendingAcks.set(chunkKey, { index: i, fileIndex: fileIndex, retries: 0 });
 
                     // Send the chunk
                     conn.send({ 
@@ -650,9 +675,7 @@
                         fileIndex: fileIndex
                     });
                     
-                    totalBytesSent += chunkSize;
-                    totalBytesSentForFile += chunkSize;
-                    pendingChunks.delete(i);
+                    totalBytesSent += (end - start);
                     
                     const progress = (totalBytesSent / totalBytes) * 100;
                     const elapsed = (performance.now() - startTime) / 1000;
@@ -663,23 +686,38 @@
                     
                     document.getElementById('sendProgressFill').style.width = progress + '%';
                     document.getElementById('sendProgressText').textContent = 
-                        `Sending ${file.name}... ${Math.round(progress)}% • ${speedStr}`;
+                        `Sending ${file.name}... ${Math.round(progress)}% • ${speedStr} • ${pendingAcks.size} pending`;
                 };
 
-                // Process chunks with proper backpressure control
+                // Process chunks with backpressure control
                 while (chunkIndex < totalChunks) {
-                    // Wait if buffer is getting too full
-                    while (conn.dataChannel && conn.dataChannel.bufferedAmount > MAX_BUFFER) {
-                        await new Promise(r => setTimeout(r, 5));
+                    // Wait if buffer is too full or too many unacknowledged chunks
+                    while (conn.dataChannel && (conn.dataChannel.bufferedAmount > MAX_BUFFER || pendingAcks.size >= MAX_IN_FLIGHT)) {
+                        await new Promise(r => setTimeout(r, 10));
                     }
                     
                     await sendNextChunk();
                 }
                 
-                // Wait for any remaining buffered data to be sent
-                while (conn.dataChannel && conn.dataChannel.bufferedAmount > 0) {
-                    await new Promise(r => setTimeout(r, 10));
+                // Wait for all acknowledgments
+                const maxWaitTime = 60000; // 60 seconds timeout
+                const waitStart = Date.now();
+                let lastAckCount = pendingAcks.size;
+                while (pendingAcks.size > 0 && (Date.now() - waitStart) < maxWaitTime) {
+                    await new Promise(r => setTimeout(r, 100));
+                    // Log progress on ACK reduction
+                    if (pendingAcks.size !== lastAckCount) {
+                        console.log(`Waiting for ACKs: ${pendingAcks.size} remaining`);
+                        lastAckCount = pendingAcks.size;
+                    }
                 }
+                
+                if (pendingAcks.size > 0) {
+                    console.warn('Some chunks were not acknowledged:', pendingAcks.size, Array.from(pendingAcks.keys()));
+                } else {
+                    console.log(`All ${totalChunks} chunks acknowledged for file ${fileIndex}`);
+                }
+                
                 conn.send({ type: 'fileDone', fileIndex: fileIndex });
             }
             conn.send({ type: 'done' });
@@ -708,6 +746,8 @@
             activeTorrents = [];
             
             conn = null; peer = null; currentFiles = []; encryptionKey = null;
+            isSending = false; // Reset sending flag
+            pendingAcks.clear(); // Clear any pending acknowledgments
             cleanupObjectURLs();
             document.getElementById('fileList').innerHTML = '';
             document.getElementById('codeBox').classList.remove('show');
@@ -844,6 +884,12 @@
 
         async function handleDataInternal(data) {
             if (data.type === 'metadata') {
+                // Prevent duplicate metadata from resetting progress
+                if (metadataReceived) {
+                    console.log('Ignoring duplicate metadata');
+                    return;
+                }
+                metadataReceived = true;
                 fileInfo = data;
                 receivedChunks = []; receivedSize = 0;
                 receivedFiles = [];
@@ -987,6 +1033,7 @@
         function resetReceiver() {
             if (conn) conn.close(); if (peer) peer.destroy();
             conn = null; peer = null; encryptionKey = null; receivedFiles = [];
+            metadataReceived = false; // Reset for next transfer
             cleanupObjectURLs();
             document.getElementById('codeInput').value = '';
             document.getElementById('magnetInput').value = '';
