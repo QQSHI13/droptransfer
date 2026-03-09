@@ -7,6 +7,7 @@
     <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Crect width='100' height='100' fill='%230d1117' rx='20'/%3E%3Ctext x='50' y='65' font-size='50' text-anchor='middle'%3E📦%3C/text%3E%3C/svg%3E">
     <script src="https://unpkg.com/peerjs@1.5.2/dist/peerjs.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/webtorrent@latest/webtorrent.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
     <style>
         :root {
             --bg: #0d1117;
@@ -118,7 +119,7 @@
         .code-input {
             width: 100%; padding: 16px; font-size: 1.5rem; text-align: center; letter-spacing: 4px;
             background: var(--bg); border: 1px solid var(--border); border-radius: 8px;
-            color: var(--text); margin-bottom: 12px; text-transform: uppercase;
+            color: var(--text); margin-bottom: 12px;
         }
         .code-input:focus { outline: none; border-color: var(--accent); }
         .magnet-input {
@@ -442,7 +443,7 @@
             if (isFolderTransfer || currentFiles.length > 1) {
                 const folderCard = document.createElement('div');
                 folderCard.className = 'file-card folder show';
-                folderCard.innerHTML = `<div class="file-name">📁 ${isFolderTransfer ? 'Folder' : 'Multiple Files'}</div><div class="file-count">${currentFiles.length} files • ${formatSize(totalSize)}</div>`;
+                folderCard.innerHTML = `<div class="file-name">📁 ${isFolderTransfer ? 'Folder' : 'Multiple Files'} (will be zipped)</div><div class="file-count">${currentFiles.length} files • ${formatSize(totalSize)}</div>`;
                 fileList.appendChild(folderCard);
                 
                 const maxPreview = 5;
@@ -466,6 +467,57 @@
                 card.innerHTML = `<div class="file-name">${f.file.name}</div><div class="file-size">${formatSize(f.file.size)}</div>`;
                 fileList.appendChild(card);
             }
+        }
+        
+        // Create a zip file from currentFiles
+        async function createZipFromFiles() {
+            if (currentFiles.length <= 1 && !isFolderTransfer) {
+                return null; // No need to zip single file
+            }
+            
+            showStatus('sendStatus', 'Zipping files...', 'info');
+            const zip = new JSZip();
+            
+            // Add all files to zip with their relative paths
+            for (const f of currentFiles) {
+                const fileData = await f.file.arrayBuffer();
+                zip.file(f.path, fileData);
+            }
+            
+            // Generate zip blob
+            const zipBlob = await zip.generateAsync({
+                type: 'blob',
+                compression: 'DEFLATE',
+                compressionOptions: { level: 6 }
+            }, (metadata) => {
+                // Update progress during zipping
+                document.getElementById('sendProgressText').textContent = 
+                    `Zipping... ${Math.round(metadata.percent)}%`;
+            });
+            
+            return zipBlob;
+        }
+        
+        // Extract zip file on receiver side
+        async function extractZip(blob, zipName) {
+            showStatus('receiveStatus', 'Extracting files...', 'info');
+            const zip = await JSZip.loadAsync(blob);
+            const extractedFiles = [];
+            
+            // Get list of files in zip
+            const fileNames = Object.keys(zip.files).filter(name => !zip.files[name].dir);
+            
+            for (const fileName of fileNames) {
+                const fileBlob = await zip.files[fileName].async('blob');
+                extractedFiles.push({
+                    blob: fileBlob,
+                    name: fileName.split('/').pop(),
+                    path: fileName,
+                    size: fileBlob.size
+                });
+            }
+            
+            return extractedFiles;
         }
         
         // Better ICE configuration for NAT traversal
@@ -612,10 +664,39 @@
         }
         
         async function sendFiles() {
+            // Check if we need to zip files (multiple files or folder)
+            let filesToSend = currentFiles;
+            let isZipped = false;
+            let zipName = 'archive.zip';
+            
+            if (currentFiles.length > 1 || isFolderTransfer) {
+                // Create zip
+                const zipBlob = await createZipFromFiles();
+                if (zipBlob) {
+                    isZipped = true;
+                    if (isFolderTransfer && currentFiles.length > 0) {
+                        // Use folder name for zip
+                        const firstPath = currentFiles[0].path;
+                        const folderName = firstPath.split('/')[0];
+                        zipName = folderName + '.zip';
+                    }
+                    filesToSend = [{
+                        file: new File([zipBlob], zipName, { type: 'application/zip' }),
+                        path: zipName,
+                        relativePath: zipName
+                    }];
+                }
+            }
+            
             const metadata = {
-                type: 'metadata', isFolder: isFolderTransfer, fileCount: currentFiles.length,
-                files: currentFiles.map(f => ({ name: f.file.name, path: f.path, size: f.file.size })),
-                totalSize: currentFiles.reduce((sum, f) => sum + f.file.size, 0)
+                type: 'metadata', 
+                isFolder: isFolderTransfer, 
+                isZipped: isZipped,
+                zipName: zipName,
+                originalFileCount: currentFiles.length,
+                fileCount: filesToSend.length,
+                files: filesToSend.map(f => ({ name: f.file.name, path: f.path, size: f.file.size })),
+                totalSize: filesToSend.reduce((sum, f) => sum + f.file.size, 0)
             };
             conn.send(metadata);
             
@@ -624,8 +705,8 @@
             const startTime = performance.now();
             document.getElementById('sendProgress').classList.add('show');
             
-            for (let fileIndex = 0; fileIndex < currentFiles.length; fileIndex++) {
-                const { file, path } = currentFiles[fileIndex];
+            for (let fileIndex = 0; fileIndex < filesToSend.length; fileIndex++) {
+                const { file, path } = filesToSend[fileIndex];
                 const buffer = await file.arrayBuffer();
                 const totalChunks = Math.ceil(buffer.byteLength / CHUNK_SIZE);
                 
@@ -995,9 +1076,33 @@
             }
         }
         
-        function finalizeTransfer() {
+        async function finalizeTransfer() {
             document.getElementById('receiveProgress').classList.remove('show');
             cleanupObjectURLs(); // Clean up previous URLs
+            
+            // Check if we received a zip file that needs extraction
+            if (fileInfo && fileInfo.isZipped && receivedFiles.length === 1) {
+                const zipFile = receivedFiles[0];
+                if (zipFile.name.endsWith('.zip')) {
+                    try {
+                        showStatus('receiveStatus', 'Extracting files from archive...', 'info');
+                        const extractedFiles = await extractZip(zipFile.blob, zipFile.name);
+                        
+                        // Replace receivedFiles with extracted files
+                        receivedFiles = extractedFiles.map(f => ({
+                            blob: f.blob,
+                            path: f.path,
+                            name: f.name
+                        }));
+                        
+                        showStatus('receiveStatus', `Extracted ${extractedFiles.length} files!`, 'success');
+                    } catch (err) {
+                        console.error('Failed to extract zip:', err);
+                        showStatus('receiveStatus', 'Failed to extract zip: ' + err.message, 'error');
+                        // Still show the zip file as download option
+                    }
+                }
+            }
             
             if (receivedFiles.length === 1) {
                 const file = receivedFiles[0];
@@ -1063,7 +1168,7 @@
             'udp://tracker.leechers-paradise.org:6969'
         ];
         
-        function initTorrentSender() {
+        async function initTorrentSender() {
             if (!client) {
                 client = new WebTorrent({
                     tracker: {
@@ -1077,16 +1182,33 @@
                 });
             }
             
-            const files = currentFiles.map(f => f.file);
+            let filesToSeed = currentFiles.map(f => f.file);
+            let torrentName = isFolderTransfer ? 'DropTransfer' : filesToSeed[0].name;
+            
+            // Zip files if multiple or folder
+            if (currentFiles.length > 1 || isFolderTransfer) {
+                const zipBlob = await createZipFromFiles();
+                if (zipBlob) {
+                    if (isFolderTransfer && currentFiles.length > 0) {
+                        const firstPath = currentFiles[0].path;
+                        const folderName = firstPath.split('/')[0];
+                        torrentName = folderName + '.zip';
+                    } else {
+                        torrentName = 'archive.zip';
+                    }
+                    filesToSeed = [new File([zipBlob], torrentName, { type: 'application/zip' })];
+                }
+            }
+            
             showStatus('sendStatus', 'Creating torrent... (this may take a moment for large files)', 'info');
             
             // Create torrent with trackers
             const opts = {
-                name: isFolderTransfer ? 'DropTransfer' : files[0].name,
+                name: torrentName,
                 announceList: [DEFAULT_TRACKERS]
             };
             
-            client.seed(files, opts, (torrent) => {
+            client.seed(filesToSeed, opts, (torrent) => {
                 console.log('Seeding:', torrent.magnetURI);
                 console.log('Torrent info hash:', torrent.infoHash);
                 activeTorrents.push(torrent);
@@ -1179,36 +1301,88 @@
                         `Downloading... ${Math.round(progress)}% • ${formatSize(torrent.downloadSpeed)}/s • ${torrent.numPeers} peer(s)`;
                 });
                 
-                torrent.on('done', () => {
+                torrent.on('done', async () => {
                     console.log('Download complete');
                     document.getElementById('receiveProgress').classList.remove('show');
                     
                     const multiFileDiv = document.getElementById('multiFileDownloads');
                     multiFileDiv.innerHTML = '<div style="margin-top: 16px; font-weight: 600;">Downloaded Files:</div>';
                     
-                    torrent.files.forEach(file => {
-                        file.getBlob((err, blob) => {
+                    // Check if downloaded file is a zip
+                    const isZipFile = torrent.files.length === 1 && torrent.files[0].name.endsWith('.zip');
+                    
+                    if (isZipFile) {
+                        // Extract zip file
+                        const zipFile = torrent.files[0];
+                        zipFile.getBlob(async (err, blob) => {
                             if (err) {
                                 console.error('Error getting blob:', err);
-                                showStatus('receiveStatus', `Error processing ${file.name}: ${err.message}`, 'error');
+                                showStatus('receiveStatus', `Error processing ${zipFile.name}: ${err.message}`, 'error');
                                 return;
                             }
-                            const url = URL.createObjectURL(blob);
-                            objectURLs.push(url);
-                            const btn = document.createElement('a');
-                            btn.href = url;
-                            btn.download = file.name;
-                            btn.className = 'download-btn';
-                            btn.style.marginTop = '8px';
-                            btn.innerHTML = `⬇️ ${file.name} (${formatSize(blob.size)})`;
-                            multiFileDiv.appendChild(btn);
+                            
+                            try {
+                                showStatus('receiveStatus', 'Extracting files from archive...', 'info');
+                                const extractedFiles = await extractZip(blob, zipFile.name);
+                                
+                                extractedFiles.forEach(f => {
+                                    const url = URL.createObjectURL(f.blob);
+                                    objectURLs.push(url);
+                                    const btn = document.createElement('a');
+                                    btn.href = url;
+                                    btn.download = f.name;
+                                    btn.className = 'download-btn';
+                                    btn.style.marginTop = '8px';
+                                    btn.innerHTML = `⬇️ ${f.name} (${formatSize(f.size)})`;
+                                    multiFileDiv.appendChild(btn);
+                                });
+                                
+                                showStatus('receiveStatus', `Download complete! Extracted ${extractedFiles.length} files.`, 'success');
+                            } catch (extractErr) {
+                                console.error('Failed to extract zip:', extractErr);
+                                // Fall back to showing the zip file
+                                const url = URL.createObjectURL(blob);
+                                objectURLs.push(url);
+                                const btn = document.createElement('a');
+                                btn.href = url;
+                                btn.download = zipFile.name;
+                                btn.className = 'download-btn';
+                                btn.style.marginTop = '8px';
+                                btn.innerHTML = `⬇️ ${zipFile.name} (${formatSize(blob.size)}) - Extract failed, download zip`;
+                                multiFileDiv.appendChild(btn);
+                                showStatus('receiveStatus', 'Download complete! (Zip extraction failed)', 'warning');
+                            }
+                            
+                            document.getElementById('transferModeIndicator').textContent = '✅ WebTorrent download complete';
+                            document.getElementById('retryBtn').textContent = '🔄 Download Another File';
+                            document.getElementById('retryBtn').style.display = 'block';
                         });
-                    });
-                    
-                    showStatus('receiveStatus', 'Download complete!', 'success');
-                    document.getElementById('transferModeIndicator').textContent = '✅ WebTorrent download complete';
-                    document.getElementById('retryBtn').textContent = '🔄 Download Another File';
-                    document.getElementById('retryBtn').style.display = 'block';
+                    } else {
+                        // Regular file(s), show as-is
+                        torrent.files.forEach(file => {
+                            file.getBlob((err, blob) => {
+                                if (err) {
+                                    console.error('Error getting blob:', err);
+                                    showStatus('receiveStatus', `Error processing ${file.name}: ${err.message}`, 'error');
+                                    return;
+                                }
+                                const url = URL.createObjectURL(blob);
+                                objectURLs.push(url);
+                                const btn = document.createElement('a');
+                                btn.href = url;
+                                btn.download = file.name;
+                                btn.className = 'download-btn';
+                                btn.style.marginTop = '8px';
+                                btn.innerHTML = `⬇️ ${file.name} (${formatSize(blob.size)})`;
+                                multiFileDiv.appendChild(btn);
+                            });
+                        });
+                        
+                        showStatus('receiveStatus', 'Download complete!', 'success');
+                        document.getElementById('transferModeIndicator').textContent = '✅ WebTorrent download complete';
+                        document.getElementById('retryBtn').textContent = '🔄 Download Another File';
+                        document.getElementById('retryBtn').style.display = 'block';
+                    }
                 });
             });
             
