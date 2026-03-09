@@ -278,6 +278,7 @@
         let sendMode = 'direct', recvMode = 'direct', client = null;
         let isFolderTransfer = false, currentFileIndex = 0, receivedFiles = [];
         let objectURLs = []; // Track created object URLs for cleanup
+        let pendingAcks = new Map(); // Track unacknowledged chunks
         
         function switchTab(tab, clickedBtn) {
             document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
@@ -465,22 +466,42 @@
             }
         }
         
+        // Better ICE configuration for NAT traversal
+        const ICE_CONFIG = {
+            iceServers: [
+                { urls: 'stun:stun.l.google.com:19302' }, 
+                { urls: 'stun:stun1.l.google.com:19302' },
+                { urls: 'stun:stun2.l.google.com:19302' },
+                { urls: 'stun:stun3.l.google.com:19302' },
+                { urls: 'stun:stun4.l.google.com:19302' },
+                { urls: 'stun:stun01.sipphone.com' },
+                { urls: 'stun:stun.ekiga.net' },
+                { urls: 'stun:stun.fwdnet.net' },
+                { urls: 'stun:stun.ideasip.com' },
+                { urls: 'stun:stun.iptel.org' },
+                { urls: 'stun:stun.rixtelecom.se' },
+                { urls: 'stun:stun.schlund.de' },
+                { urls: 'stun:stunserver.org' },
+                { urls: 'stun:stun.softjoys.com' },
+                { urls: 'stun:stun.voiparound.com' },
+                { urls: 'stun:stun.voipbuster.com' },
+                { urls: 'stun:stun.voipstunt.com' },
+                { urls: 'stun:stun.voxgratia.org' },
+                { urls: 'stun:stun.xten.com' }
+            ],
+            iceCandidatePoolSize: 10,
+            iceTransportPolicy: 'all',
+            bundlePolicy: 'balanced',
+            rtcpMuxPolicy: 'require'
+        };
+        
         function initSender() {
             console.log('Initializing sender peer...');
             showStatus('sendStatus', 'Creating peer connection...', 'info');
             
             peer = new Peer({
-                config: { 
-                    iceServers: [
-                        { urls: 'stun:stun.l.google.com:19302' }, 
-                        { urls: 'stun:stun1.l.google.com:19302' },
-                        { urls: 'stun:stun2.l.google.com:19302' },
-                        { urls: 'stun:stun3.l.google.com:19302' },
-                        { urls: 'stun:stun4.l.google.com:19302' }
-                    ],
-                    iceCandidatePoolSize: 10 // Pre-gather more ICE candidates for faster connection
-                },
-                debug: 1 // Reduced logging for better performance
+                config: ICE_CONFIG,
+                debug: 1
             });
             
             peer.on('open', (id) => {
@@ -495,8 +516,12 @@
                 console.log('Incoming connection from:', connection.peer);
                 document.getElementById('connectionWaiting').style.display = 'none';
 
-                // Use the incoming connection directly instead of creating a new outgoing connection
+                // Use the incoming connection directly
                 conn = connection;
+                
+                // Set reliable connection options
+                conn.serialization = 'binary';
+                conn.reliable = true;
 
                 try {
                     encryptionKey = await deriveKey(peer.id, connection.peer);
@@ -511,26 +536,63 @@
             
             peer.on('error', (err) => {
                 console.error('Peer error:', err);
-                showStatus('sendStatus', 'Error: ' + err.message + '. Try WebTorrent mode.', 'error');
+                let msg = 'Connection error: ' + err.message;
+                if (err.type === 'unavailable-id') {
+                    msg = 'ID already in use. Please refresh and try again.';
+                } else if (err.type === 'network') {
+                    msg = 'Network error. Check your connection.';
+                }
+                showStatus('sendStatus', msg + ' Try WebTorrent mode.', 'error');
+                document.getElementById('connectionWaiting').style.display = 'none';
+            });
+            
+            peer.on('disconnected', () => {
+                console.log('Peer disconnected from signaling server');
+                showStatus('sendStatus', 'Signaling connection lost. Trying to reconnect...', 'warning');
+                peer.reconnect();
             });
         }
         
         function handleConnection() {
             console.log('Setting up connection handlers');
-            showStatus('sendStatus', 'Receiver connected! Sending file(s)...', 'info');
+            showStatus('sendStatus', 'Receiver connected! Preparing to send...', 'info');
+            
+            // Show reset button immediately so user can cancel if needed
+            document.getElementById('resetBtn').style.display = 'block';
+            document.getElementById('resetBtn').disabled = true;
+            
+            let receiverReady = false;
 
             // Set up data handler first before sending
-            conn.on('data', (data) => {
+            conn.on('data', async (data) => {
                 console.log('Sender received data:', data);
-                if (data === 'received') {
+                if (data === 'ready') {
+                    receiverReady = true;
+                    showStatus('sendStatus', 'Receiver ready! Sending file(s)...', 'info');
+                    await sendFiles();
+                } else if (data === 'received') {
                     showStatus('sendStatus', 'File(s) sent successfully!', 'success');
-                    document.getElementById('resetBtn').style.display = 'block';
+                    document.getElementById('resetBtn').disabled = false;
+                    document.getElementById('resetBtn').textContent = '🔄 Send Another File';
+                } else if (data && data.type === 'ack') {
+                    // Handle chunk acknowledgment
+                    pendingAcks.delete(data.chunkIndex + '-' + data.fileIndex);
                 }
             });
-            conn.on('error', (err) => { console.error('Connection error:', err); showStatus('sendStatus', 'Transfer error: ' + err.message, 'error'); });
-
-            // Start sending after a short delay to ensure receiver is ready
-            setTimeout(() => sendFiles(), 500);
+            
+            conn.on('error', (err) => { 
+                console.error('Connection error:', err); 
+                showStatus('sendStatus', 'Transfer error: ' + err.message, 'error');
+                document.getElementById('resetBtn').disabled = false;
+            });
+            
+            conn.on('close', () => {
+                console.log('Connection closed');
+                document.getElementById('resetBtn').disabled = false;
+                if (document.getElementById('sendStatus').textContent.includes('Sending')) {
+                    showStatus('sendStatus', 'Connection closed unexpectedly', 'error');
+                }
+            });
         }
         
         async function sendFiles() {
@@ -676,16 +738,7 @@
             let hasReceivedData = false;
             
             peer = new Peer({
-                config: { 
-                    iceServers: [
-                        { urls: 'stun:stun.l.google.com:19302' }, 
-                        { urls: 'stun:stun1.l.google.com:19302' },
-                        { urls: 'stun:stun2.l.google.com:19302' },
-                        { urls: 'stun:stun3.l.google.com:19302' },
-                        { urls: 'stun:stun4.l.google.com:19302' }
-                    ],
-                    iceCandidatePoolSize: 10
-                },
+                config: ICE_CONFIG,
                 debug: 1
             });
             
@@ -697,7 +750,8 @@
                     reliable: true, 
                     serialization: 'binary', 
                     ordered: true,
-                    maxPacketLifeTime: 0 // No timeout for large transfers
+                    maxPacketLifeTime: 0,
+                    maxRetransmits: 10
                 });
 
                 conn.on('open', async () => {
@@ -711,6 +765,9 @@
                         encryptionKey = await deriveKey(code, peer.id);
                         document.getElementById('speedBadge').style.display = 'block';
                     } catch (err) { console.error('Key derivation failed:', err); }
+                    
+                    // Signal ready to receive
+                    conn.send('ready');
                 });
 
                 conn.on('data', (data) => {
@@ -836,6 +893,11 @@
                     chunkCache.set(data.index, chunkData);
                     receivedSize += chunkData.byteLength;
                 }
+                
+                // Send acknowledgment
+                if (conn && conn.open) {
+                    conn.send({ type: 'ack', chunkIndex: data.index, fileIndex: data.fileIndex });
+                }
 
                 const progress = (receivedSize / fileInfo.totalSize) * 100;
                 const elapsed = (performance.now() - (fileInfo.receiveStartTime || (fileInfo.receiveStartTime = performance.now()))) / 1000;
@@ -945,27 +1007,61 @@
         // ==================== WEBTORRENT ====================
         let activeTorrents = [];
         
+        // Default WebTorrent trackers for better connectivity
+        const DEFAULT_TRACKERS = [
+            'wss://tracker.openwebtorrent.com',
+            'wss://tracker.files.fm:7073/announce',
+            'wss://spacetradersapi-chatbox.fly.dev:443/announce',
+            'udp://tracker.openbittorrent.com:80',
+            'udp://tracker.leechers-paradise.org:6969'
+        ];
+        
         function initTorrentSender() {
-            if (!client) client = new WebTorrent();
+            if (!client) {
+                client = new WebTorrent({
+                    tracker: {
+                        announce: DEFAULT_TRACKERS,
+                        rtcConfig: {
+                            iceServers: [
+                                { urls: 'stun:stun.l.google.com:19302' }
+                            ]
+                        }
+                    }
+                });
+            }
             
             const files = currentFiles.map(f => f.file);
-            showStatus('sendStatus', 'Creating torrent...', 'info');
+            showStatus('sendStatus', 'Creating torrent... (this may take a moment for large files)', 'info');
             
-            client.seed(files, { name: isFolderTransfer ? 'DropTransfer' : files[0].name }, (torrent) => {
+            // Create torrent with trackers
+            const opts = {
+                name: isFolderTransfer ? 'DropTransfer' : files[0].name,
+                announceList: [DEFAULT_TRACKERS]
+            };
+            
+            client.seed(files, opts, (torrent) => {
                 console.log('Seeding:', torrent.magnetURI);
+                console.log('Torrent info hash:', torrent.infoHash);
                 activeTorrents.push(torrent);
                 document.getElementById('magnetLink').textContent = torrent.magnetURI;
                 document.getElementById('magnetBox').classList.add('show');
-                showStatus('sendStatus', 'Torrent ready! Share the magnet link.', 'success');
+                showStatus('sendStatus', `Torrent ready! ${torrent.numPeers} peer(s) connected`, 'success');
                 
-                const updateUpload = (bytes) => {
+                const updateUpload = () => {
                     if (document.getElementById('sendProgressFill')) {
-                        document.getElementById('sendProgressFill').style.width = '100%';
-                        document.getElementById('sendProgressText').textContent = `Uploading... ${formatSize(torrent.uploaded)} uploaded`;
+                        const progress = Math.min(100, (torrent.uploaded / torrent.length) * 100);
+                        document.getElementById('sendProgressFill').style.width = progress + '%';
+                        document.getElementById('sendProgressText').textContent = 
+                            `Seeding... ${formatSize(torrent.uploaded)} uploaded • ${torrent.numPeers} peer(s)`;
                     }
                 };
                 
                 torrent.on('upload', updateUpload);
+                torrent.on('wire', (wire) => {
+                    console.log('New peer connected:', wire.remoteAddress);
+                    showStatus('sendStatus', `Peer connected! ${torrent.numPeers} peer(s) total`, 'success');
+                    updateUpload();
+                });
                 
                 // Store cleanup function on torrent for later
                 torrent._cleanup = () => {
@@ -974,6 +1070,13 @@
                 
                 document.getElementById('sendProgress').classList.add('show');
                 document.getElementById('resetBtn').style.display = 'block';
+                document.getElementById('resetBtn').disabled = false;
+                document.getElementById('resetBtn').textContent = '🔄 Send Another File';
+            });
+            
+            client.on('error', (err) => {
+                console.error('WebTorrent client error:', err);
+                showStatus('sendStatus', 'WebTorrent error: ' + err.message, 'error');
             });
         }
         
@@ -984,24 +1087,49 @@
                 return;
             }
             
-            if (!client) client = new WebTorrent();
+            if (!client) {
+                client = new WebTorrent({
+                    tracker: {
+                        announce: DEFAULT_TRACKERS
+                    }
+                });
+            }
             
             document.getElementById('torrentBtn').disabled = true;
             document.getElementById('transferModeIndicator').style.display = 'flex';
             document.getElementById('transferModeIndicator').className = 'transfer-mode-indicator webtorrent';
             document.getElementById('transferModeIndicator').textContent = '🌐 Downloading via WebTorrent...';
-            showStatus('receiveStatus', 'Connecting to peers...', 'info');
+            showStatus('receiveStatus', 'Connecting to peers... (this may take a moment)', 'info');
             
-            client.add(magnet, (torrent) => {
+            // Add timeout for connection
+            let connectionTimeout = setTimeout(() => {
+                if (document.getElementById('torrentBtn').disabled) {
+                    showStatus('receiveStatus', 'Connection timeout. No peers found. Make sure the sender is online.', 'error');
+                    document.getElementById('torrentBtn').disabled = false;
+                }
+            }, 30000);
+            
+            client.add(magnet, { announce: DEFAULT_TRACKERS }, (torrent) => {
+                clearTimeout(connectionTimeout);
                 console.log('Downloading:', torrent.name);
-                showStatus('receiveStatus', `Downloading ${torrent.files.length} file(s)...`, 'info');
+                showStatus('receiveStatus', `Found ${torrent.files.length} file(s). Connecting to peers...`, 'info');
                 document.getElementById('receiveProgress').classList.add('show');
+                
+                torrent.on('warning', (err) => {
+                    console.warn('Torrent warning:', err);
+                });
+                
+                torrent.on('error', (err) => {
+                    console.error('Torrent error:', err);
+                    showStatus('receiveStatus', 'Download error: ' + err.message, 'error');
+                    document.getElementById('torrentBtn').disabled = false;
+                });
                 
                 torrent.on('download', (bytes) => {
                     const progress = torrent.progress * 100;
                     document.getElementById('receiveProgressFill').style.width = progress + '%';
                     document.getElementById('receiveProgressText').textContent = 
-                        `Downloading... ${Math.round(progress)}% (${formatSize(torrent.downloaded)} / ${formatSize(torrent.length)})`;
+                        `Downloading... ${Math.round(progress)}% • ${formatSize(torrent.downloadSpeed)}/s • ${torrent.numPeers} peer(s)`;
                 });
                 
                 torrent.on('done', () => {
@@ -1025,7 +1153,7 @@
                             btn.download = file.name;
                             btn.className = 'download-btn';
                             btn.style.marginTop = '8px';
-                            btn.innerHTML = `⬇️ ${file.name}`;
+                            btn.innerHTML = `⬇️ ${file.name} (${formatSize(blob.size)})`;
                             multiFileDiv.appendChild(btn);
                         });
                     });
@@ -1038,6 +1166,8 @@
             });
             
             client.on('error', (err) => {
+                clearTimeout(connectionTimeout);
+                console.error('WebTorrent client error:', err);
                 showStatus('receiveStatus', 'WebTorrent error: ' + err.message, 'error');
                 document.getElementById('torrentBtn').disabled = false;
             });
