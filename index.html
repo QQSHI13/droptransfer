@@ -811,9 +811,9 @@
                         }
                     }
 
-                    // Track this chunk for acknowledgment
+                    // Track this chunk for acknowledgment (store chunk data for retries)
                     const chunkKey = i + '-' + fileIndex;
-                    pendingAcks.set(chunkKey, { index: i, fileIndex: fileIndex, retries: 0 });
+                    pendingAcks.set(chunkKey, { index: i, fileIndex: fileIndex, retries: 0, chunkData: chunk, iv: iv });
 
                     // Send the chunk
                     conn.send({ 
@@ -895,33 +895,20 @@
                 
                 if (pendingAcks.size > 0) {
                     console.warn('Some chunks were not acknowledged, retrying:', pendingAcks.size, Array.from(pendingAcks.keys()));
-                    // Retry unacknowledged chunks
+                    // Retry unacknowledged chunks using stored chunk data
                     for (const [key, chunkInfo] of pendingAcks) {
                         if (chunkInfo.retries < 3) {
                             console.log(`Retrying chunk ${key} (attempt ${chunkInfo.retries + 1})`);
                             chunkInfo.retries++;
-                            const chunkKey = chunkInfo.index + '-' + chunkInfo.fileIndex;
-                            const file = filesToSend[chunkInfo.fileIndex];
-                            const chunkSize = CHUNK_SIZE;
-                            const start = chunkInfo.index * chunkSize;
-                            const end = Math.min(start + chunkSize, file.size);
                             
                             try {
-                                const chunk = file.slice(start, end);
-                                let chunkData = chunk;
-                                let iv = null;
-                                if (encryptionKey) {
-                                    const encrypted = await encryptChunk(encryptionKey, chunk);
-                                    chunkData = encrypted.data;
-                                    iv = encrypted.iv;
-                                }
-                                
+                                // Use stored chunk data (already encrypted if needed)
                                 conn.send({ 
                                     type: 'chunk', 
-                                    data: chunkData, 
+                                    data: chunkInfo.chunkData, 
                                     index: chunkInfo.index, 
                                     total: totalChunks, 
-                                    iv: iv ? Array.from(iv) : null,
+                                    iv: chunkInfo.iv ? Array.from(chunkInfo.iv) : null,
                                     fileIndex: chunkInfo.fileIndex
                                 });
                             } catch (err) {
@@ -938,6 +925,7 @@
                     
                     if (pendingAcks.size > 0) {
                         console.error('Chunks still not acknowledged after retry:', Array.from(pendingAcks.keys()));
+                        showStatus('sendStatus', `Transfer incomplete: ${pendingAcks.size} chunk(s) failed`, 'warning');
                     }
                 } else {
                     console.log(`All ${totalChunks} chunks acknowledged for file ${fileIndex}`);
