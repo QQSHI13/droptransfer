@@ -7,14 +7,7 @@ const urlsToCache = [
 self.addEventListener('install', (event) => {
   event.waitUntil(
     caches.open(CACHE_NAME)
-      .then((cache) => {
-        console.log('Caching static assets');
-        return cache.addAll(urlsToCache).catch(err => {
-          console.error('Cache install error:', err);
-          // Continue even if some assets fail to cache
-          return Promise.resolve();
-        });
-      })
+      .then((cache) => cache.addAll(urlsToCache))
   );
   self.skipWaiting();
 });
