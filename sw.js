@@ -15,11 +15,8 @@ self.addEventListener('install', (event) => {
   event.waitUntil(
     caches.open(CACHE_NAME)
       .then((cache) => {
-        // Add cache-bust query to force fresh fetch on hard reload
-        const urlsWithCacheBust = urlsToCache.map(url => {
-          return url + (url.includes('?') ? '&' : '?') + '_sw_cache=' + cacheBust;
-        });
-        return cache.addAll(urlsWithCacheBust);
+        // Cache URLs directly - versioning is handled by CACHE_NAME
+        return cache.addAll(urlsToCache);
       })
       .then(() => {
         // Always skip waiting for immediate activation
