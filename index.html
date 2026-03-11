@@ -251,24 +251,93 @@
     </div>
 
     <script>
-        // Unregister any existing service workers to clear old PWA cache
-        if ('serviceWorker' in navigator) {
-            navigator.serviceWorker.getRegistrations().then(registrations => {
-                for (let registration of registrations) {
-                    registration.unregister();
-                    console.log('Service worker unregistered:', registration.scope);
+        // Service Worker auto-refresh on hard reload
+        (function() {
+            if (!('serviceWorker' in navigator)) return;
+            
+            // Detect hard reload (Ctrl+F5 or Cmd+Shift+R)
+            const isHardReload = performance.navigation.type === 1 && 
+                (performance.navigation.redirectCount === 0);
+            
+            // Alternative: Check if page was loaded with cache-busting
+            const navigationEntries = performance.getEntriesByType('navigation');
+            const isCacheBypass = navigationEntries.length > 0 && 
+                navigationEntries[0].deliveryType === 'navigate';
+            
+            let refreshing = false;
+            
+            // Listen for controller changes (new SW activated)
+            navigator.serviceWorker.addEventListener('controllerchange', () => {
+                if (refreshing) return;
+                refreshing = true;
+                console.log('[SW] Controller changed, reloading for fresh content...');
+                window.location.reload();
+            });
+            
+            // Handle messages from service worker
+            navigator.serviceWorker.addEventListener('message', (event) => {
+                if (event.data && event.data.type === 'SW_ACTIVATED') {
+                    console.log('[SW] Service worker activated:', event.data.version);
+                }
+                if (event.data && event.data.type === 'CACHE_CLEARED') {
+                    console.log('[SW] Cache cleared, reloading...');
+                    window.location.reload();
                 }
             });
-            // Also clear all caches
-            if ('caches' in window) {
-                caches.keys().then(cacheNames => {
-                    cacheNames.forEach(cacheName => {
-                        caches.delete(cacheName);
-                        console.log('Cache deleted:', cacheName);
+            
+            // Register service worker
+            navigator.serviceWorker.register('./sw.js').then(registration => {
+                console.log('[SW] Registered:', registration.scope);
+                
+                // Handle hard reload - clear caches and refresh
+                if (isHardReload) {
+                    console.log('[SW] Hard reload detected, clearing caches...');
+                    
+                    // Tell SW to clear caches
+                    if (registration.active) {
+                        registration.active.postMessage({ type: 'HARD_RELOAD' });
+                    }
+                    
+                    // Also clear local caches
+                    if ('caches' in window) {
+                        caches.keys().then(cacheNames => {
+                            Promise.all(cacheNames.map(name => caches.delete(name))).then(() => {
+                                console.log('[SW] Local caches cleared');
+                            });
+                        });
+                    }
+                }
+                
+                // Check for updates
+                registration.addEventListener('updatefound', () => {
+                    const newWorker = registration.installing;
+                    console.log('[SW] Update found, new worker installing...');
+                    
+                    newWorker.addEventListener('statechange', () => {
+                        if (newWorker.state === 'installed' && navigator.serviceWorker.controller) {
+                            console.log('[SW] New version available, activating...');
+                            // New version ready, skip waiting
+                            newWorker.postMessage({ type: 'SKIP_WAITING' });
+                        }
                     });
                 });
-            }
-        }
+                
+                // Check for updates periodically
+                setInterval(() => {
+                    registration.update();
+                }, 60000); // Check every minute
+                
+            }).catch(error => {
+                console.error('[SW] Registration failed:', error);
+            });
+            
+            // Listen for beforeinstallprompt (PWA install)
+            window.addEventListener('beforeinstallprompt', (e) => {
+                e.preventDefault();
+                window.deferredPrompt = e;
+                console.log('[PWA] Install prompt available');
+            });
+        })();
     </script>
     <script>
         const CHUNK_SIZE = 262144; // Increased from 16KB to 256KB for much better throughput
