@@ -3,11 +3,13 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' https://unpkg.com https://cdn.jsdelivr.net https://cdnjs.cloudflare.com; style-src 'self' 'unsafe-inline'; connect-src *; media-src blob:; img-src data: blob:;">
     <title>DropTransfer - Secure P2P File Sharing</title>
     <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Crect width='100' height='100' fill='%230d1117' rx='20'/%3E%3Ctext x='50' y='65' font-size='50' text-anchor='middle'%3E📦%3C/text%3E%3C/svg%3E">
     <script src="https://unpkg.com/peerjs@1.5.2/dist/peerjs.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/webtorrent@latest/webtorrent.min.js"></script>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
     <style>
         :root {
             --bg: #0d1117;
@@ -195,6 +197,7 @@
                 <div class="code-label">Your transfer code:</div>
                 <div class="code-value" id="peerId" onclick="copyToClipboard('peerId')"></div>
                 <div class="code-hint">Share this code with receiver • Click to copy</div>
+                <div id="qrcode" style="margin: 16px auto; width: 128px; height: 128px; display: none;"></div>
                 <div class="connection-waiting" id="connectionWaiting" style="display: none; margin-top: 12px; color: var(--text-secondary); font-size: 0.85rem;">⏳ Waiting for receiver to connect...</div>
             </div>
             
@@ -208,6 +211,7 @@
             <div class="progress-text" id="sendProgressText"></div>
             <div class="status" id="sendStatus"></div>
             
+            <button class="btn btn-warning" id="cancelBtn" onclick="cancelTransfer()" style="display: none;">⛔ Cancel Transfer</button>
             <button class="btn btn-secondary" id="resetBtn" onclick="resetSender()" style="display: none;">🔄 Send Another File</button>
         </div>
         
@@ -274,6 +278,9 @@
         const ENCRYPTION_ALGORITHM = 'AES-GCM';
         const KEY_DERIVATION_ALGORITHM = 'PBKDF2';
         
+        // (activeTorrents moved to top of script to fix hoisting issue)
+        let activeTorrents = [];
+        
         let peer = null, conn = null, currentFiles = [], receivedChunks = [];
         let receivedSize = 0, fileInfo = null, encryptionKey = null;
         let sendMode = 'direct', recvMode = 'direct', client = null;
@@ -282,6 +289,14 @@
         let pendingAcks = new Map(); // Track unacknowledged chunks
         let isSending = false; // Guard against re-entrant sendFiles
         let metadataReceived = false; // Guard against duplicate metadata
+        let abortController = null; // For canceling transfers
+        let pbkdf2Salt = null; // Random salt for key derivation
+        
+        // Constants for validation
+        const PEER_ID_REGEX = /^[a-zA-Z0-9_-]+$/;
+        const MAGNET_LINK_REGEX = /^magnet:\?xt=urn:[a-z0-9]+:[a-zA-Z0-9]+/i;
+        const MAX_PEER_ID_LENGTH = 64;
+        const MAX_MAGNET_LENGTH = 2048;
         
         function switchTab(tab, clickedBtn) {
             document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
@@ -327,20 +342,83 @@
             setTimeout(() => hideStatus('sendStatus'), 1500);
         }
         
-        async function deriveKey(peerId1, peerId2) {
+        function generateSalt() {
+            return crypto.getRandomValues(new Uint8Array(32));
+        }
+        
+        async function deriveKey(peerId1, peerId2, existingSalt = null) {
             const sortedIds = [peerId1, peerId2].sort();
             const encoder = new TextEncoder();
             const data = encoder.encode(sortedIds.join(''));
-            const salt = encoder.encode('DropTransferSalt2024');
+            
+            // Generate new salt if not provided, otherwise use existing
+            if (!existingSalt && !pbkdf2Salt) {
+                pbkdf2Salt = generateSalt();
+            }
+            const salt = existingSalt || pbkdf2Salt;
             
             const keyMaterial = await crypto.subtle.importKey('raw', data, { name: KEY_DERIVATION_ALGORITHM }, false, ['deriveKey']);
             return crypto.subtle.deriveKey(
-                { name: KEY_DERIVATION_ALGORITHM, salt: salt, iterations: 100000, hash: 'SHA-256' },
+                { name: KEY_DERIVATION_ALGORITHM, salt: salt, iterations: 600000, hash: 'SHA-256' },
                 keyMaterial,
                 { name: ENCRYPTION_ALGORITHM, length: 256 },
                 false,
                 ['encrypt', 'decrypt']
             );
+        }
+        
+        // HTML sanitization utility to prevent XSS
+        function escapeHtml(text) {
+            if (typeof text !== 'string') return '';
+            const div = document.createElement('div');
+            div.textContent = text;
+            return div.innerHTML;
+        }
+        
+        // Input validation functions
+        function validatePeerId(peerId) {
+            if (!peerId || typeof peerId !== 'string') return false;
+            if (peerId.length === 0 || peerId.length > MAX_PEER_ID_LENGTH) return false;
+            return PEER_ID_REGEX.test(peerId);
+        }
+        
+        function validateMagnetLink(link) {
+            if (!link || typeof link !== 'string') return false;
+            if (link.length === 0 || link.length > MAX_MAGNET_LENGTH) return false;
+            return MAGNET_LINK_REGEX.test(link);
+        }
+        
+        // Generate QR code for peer ID
+        let qrCodeInstance = null;
+        function generateQRCode(text) {
+            const qrContainer = document.getElementById('qrcode');
+            if (!qrContainer || typeof QRCode === 'undefined') return;
+            
+            qrContainer.innerHTML = '';
+            qrContainer.style.display = 'block';
+            
+            try {
+                qrCodeInstance = new QRCode(qrContainer, {
+                    text: text,
+                    width: 128,
+                    height: 128,
+                    colorDark: '#58a6ff',
+                    colorLight: '#0d1117',
+                    correctLevel: QRCode.CorrectLevel.M
+                });
+            } catch (err) {
+                console.log('QR code generation failed:', err);
+                qrContainer.style.display = 'none';
+            }
+        }
+        
+        function clearQRCode() {
+            const qrContainer = document.getElementById('qrcode');
+            if (qrContainer) {
+                qrContainer.innerHTML = '';
+                qrContainer.style.display = 'none';
+            }
+            qrCodeInstance = null;
         }
         
         async function encryptChunk(key, data, iv) {
@@ -450,7 +528,7 @@
                 currentFiles.slice(0, maxPreview).forEach(f => {
                     const card = document.createElement('div');
                     card.className = 'file-card show';
-                    card.innerHTML = `<div class="file-name">${f.file.name}</div>${f.path !== f.file.name ? `<div class="file-path">${f.path}</div>` : ''}<div class="file-size">${formatSize(f.file.size)}</div>`;
+                    card.innerHTML = `<div class="file-name">${escapeHtml(f.file.name)}</div>${f.path !== f.file.name ? `<div class="file-path">${escapeHtml(f.path)}</div>` : ''}<div class="file-size">${formatSize(f.file.size)}</div>`;
                     fileList.appendChild(card);
                 });
                 if (currentFiles.length > maxPreview) {
@@ -464,7 +542,7 @@
                 const f = currentFiles[0];
                 const card = document.createElement('div');
                 card.className = 'file-card show';
-                card.innerHTML = `<div class="file-name">${f.file.name}</div><div class="file-size">${formatSize(f.file.size)}</div>`;
+                card.innerHTML = `<div class="file-name">${escapeHtml(f.file.name)}</div><div class="file-size">${formatSize(f.file.size)}</div>`;
                 fileList.appendChild(card);
             }
         }
@@ -520,28 +598,12 @@
             return extractedFiles;
         }
         
-        // Better ICE configuration for NAT traversal
+        // Optimized ICE configuration with 3 STUN servers for better performance
         const ICE_CONFIG = {
             iceServers: [
                 { urls: 'stun:stun.l.google.com:19302' }, 
                 { urls: 'stun:stun1.l.google.com:19302' },
-                { urls: 'stun:stun2.l.google.com:19302' },
-                { urls: 'stun:stun3.l.google.com:19302' },
-                { urls: 'stun:stun4.l.google.com:19302' },
-                { urls: 'stun:stun01.sipphone.com' },
-                { urls: 'stun:stun.ekiga.net' },
-                { urls: 'stun:stun.fwdnet.net' },
-                { urls: 'stun:stun.ideasip.com' },
-                { urls: 'stun:stun.iptel.org' },
-                { urls: 'stun:stun.rixtelecom.se' },
-                { urls: 'stun:stun.schlund.de' },
-                { urls: 'stun:stunserver.org' },
-                { urls: 'stun:stun.softjoys.com' },
-                { urls: 'stun:stun.voiparound.com' },
-                { urls: 'stun:stun.voipbuster.com' },
-                { urls: 'stun:stun.voipstunt.com' },
-                { urls: 'stun:stun.voxgratia.org' },
-                { urls: 'stun:stun.xten.com' }
+                { urls: 'stun:stun2.l.google.com:19302' }
             ],
             iceCandidatePoolSize: 10,
             iceTransportPolicy: 'all',
@@ -564,6 +626,9 @@
                 document.getElementById('codeBox').classList.add('show');
                 document.getElementById('connectionWaiting').style.display = 'block';
                 showStatus('sendStatus', 'Ready! Share the code above with receiver', 'success');
+                
+                // Generate QR code for easy sharing
+                generateQRCode(id);
             });
             
             peer.on('connection', async (connection) => {
@@ -614,6 +679,7 @@
             // Show reset button immediately so user can cancel if needed
             document.getElementById('resetBtn').style.display = 'block';
             document.getElementById('resetBtn').disabled = true;
+            document.getElementById('cancelBtn').style.display = 'block';
             
             let receiverReady = false;
             isSending = false; // Reset sending flag for new connection
@@ -640,6 +706,7 @@
                     showStatus('sendStatus', 'File(s) sent successfully!', 'success');
                     document.getElementById('resetBtn').disabled = false;
                     document.getElementById('resetBtn').textContent = '🔄 Send Another File';
+                    document.getElementById('cancelBtn').style.display = 'none';
                 } else if (data && data.type === 'ack') {
                     // Handle chunk acknowledgment
                     pendingAcks.delete(data.chunkIndex + '-' + data.fileIndex);
@@ -651,12 +718,14 @@
                 showStatus('sendStatus', 'Transfer error: ' + err.message, 'error');
                 isSending = false;
                 document.getElementById('resetBtn').disabled = false;
+                document.getElementById('cancelBtn').style.display = 'none';
             });
             
             conn.on('close', () => {
                 console.log('Connection closed');
                 isSending = false;
                 document.getElementById('resetBtn').disabled = false;
+                document.getElementById('cancelBtn').style.display = 'none';
                 if (document.getElementById('sendStatus').textContent.includes('Sending')) {
                     showStatus('sendStatus', 'Connection closed unexpectedly', 'error');
                 }
@@ -770,10 +839,41 @@
                         `Sending ${file.name}... ${Math.round(progress)}% • ${speedStr} • ${pendingAcks.size} pending`;
                 };
 
-                // Process chunks with backpressure control
+                // Process chunks with backpressure control and timeout protection
+                abortController = new AbortController();
+                const loopTimeout = 300000; // 5 minute max per file
+                const loopStartTime = Date.now();
+                
                 while (chunkIndex < totalChunks) {
+                    // Check for abort signal
+                    if (abortController.signal.aborted) {
+                        throw new Error('Transfer cancelled by user');
+                    }
+                    
+                    // Safety check: prevent infinite loop if dataChannel becomes undefined
+                    if (!conn || !conn.open) {
+                        throw new Error('Connection lost during transfer');
+                    }
+                    
+                    // Timeout protection
+                    if (Date.now() - loopStartTime > loopTimeout) {
+                        throw new Error('Transfer timeout - file transfer took too long');
+                    }
+                    
                     // Wait if buffer is too full or too many unacknowledged chunks
+                    let waitIterations = 0;
+                    const maxWaitIterations = 6000; // Max 60 seconds waiting (6000 * 10ms)
+                    
                     while (conn.dataChannel && (conn.dataChannel.bufferedAmount > MAX_BUFFER || pendingAcks.size >= MAX_IN_FLIGHT)) {
+                        if (abortController.signal.aborted) {
+                            throw new Error('Transfer cancelled by user');
+                        }
+                        if (!conn || !conn.open) {
+                            throw new Error('Connection lost during transfer');
+                        }
+                        if (waitIterations++ > maxWaitIterations) {
+                            throw new Error('Buffer timeout - transfer stalled');
+                        }
                         await new Promise(r => setTimeout(r, 10));
                     }
                     
@@ -815,6 +915,47 @@
             objectURLs = [];
         }
 
+        function cleanupAllMemory() {
+            // Clear all arrays and caches
+            receivedChunks = [];
+            receivedFiles = [];
+            currentFiles = [];
+            dataQueue.length = 0;
+            chunkCache.clear();
+            pendingAcks.clear();
+            
+            // Clear encryption key material
+            pbkdf2Salt = null;
+            encryptionKey = null;
+            
+            // Reset state flags
+            isSending = false;
+            metadataReceived = false;
+            isFolderTransfer = false;
+            currentFileIndex = 0;
+            receivedSize = 0;
+            expectedChunkIndex = 0;
+            
+            // Clear abort controller
+            abortController = null;
+        }
+        
+        function cancelTransfer() {
+            if (abortController) {
+                abortController.abort();
+            }
+            if (conn && conn.open) {
+                try {
+                    conn.send({ type: 'cancel' });
+                } catch (e) {
+                    console.log('Error sending cancel:', e);
+                }
+            }
+            cleanupAllMemory();
+            resetSender();
+            showStatus('sendStatus', 'Transfer cancelled', 'warning');
+        }
+        
         function resetSender() {
             if (conn) conn.close();
             if (peer) peer.destroy();
@@ -826,10 +967,8 @@
             });
             activeTorrents = [];
             
-            conn = null; peer = null; currentFiles = []; encryptionKey = null;
-            isSending = false; // Reset sending flag
-            pendingAcks.clear(); // Clear any pending acknowledgments
-            cleanupObjectURLs();
+            cleanupAllMemory();
+            conn = null; peer = null;
             document.getElementById('fileList').innerHTML = '';
             document.getElementById('codeBox').classList.remove('show');
             document.getElementById('magnetBox').classList.remove('show');
@@ -837,10 +976,12 @@
             document.getElementById('sendProgressFill').style.width = '0%';
             document.getElementById('sendProgressText').textContent = '';
             document.getElementById('resetBtn').style.display = 'none';
+            document.getElementById('cancelBtn').style.display = 'none';
             document.getElementById('securityBadge').classList.remove('encrypted');
             document.getElementById('securityBadge').innerHTML = '🔐 End-to-end encryption enabled';
             document.getElementById('speedBadge').style.display = 'none';
             document.getElementById('connectionWaiting').style.display = 'none';
+            clearQRCode();
             hideStatus('sendStatus');
         }
         
@@ -848,6 +989,12 @@
         function connect() {
             const code = document.getElementById('codeInput').value.trim();
             if (!code) { showStatus('receiveStatus', 'Please enter a code', 'error'); return; }
+            
+            // Validate peer ID format
+            if (!validatePeerId(code)) {
+                showStatus('receiveStatus', 'Invalid code format. Codes contain only letters, numbers, hyphens, and underscores.', 'error');
+                return;
+            }
             
             document.getElementById('connectBtn').disabled = true;
             showStatus('receiveStatus', 'Initializing...', 'info');
@@ -945,6 +1092,13 @@
         let isProcessingData = false;
         const chunkCache = new Map(); // Cache for out-of-order chunks
         let expectedChunkIndex = 0;
+        
+        function resetDataQueue() {
+            dataQueue.length = 0;
+            isProcessingData = false;
+            chunkCache.clear();
+            expectedChunkIndex = 0;
+        }
 
         async function processDataQueue() {
             if (isProcessingData) return;
@@ -1073,6 +1227,11 @@
                 }
                 
                 finalizeTransfer();
+            } else if (data.type === 'cancel') {
+                // Handle transfer cancellation
+                showStatus('receiveStatus', 'Transfer cancelled by sender', 'warning');
+                cleanupAllMemory();
+                resetReceiver();
             }
         }
         
@@ -1111,7 +1270,7 @@
                     btn.download = file.name;
                     btn.className = 'download-btn';
                     btn.style.marginTop = '8px';
-                    btn.innerHTML = `⬇️ ${file.name}`;
+                    btn.innerHTML = `⬇️ ${escapeHtml(file.name)}`;
                     multiFileDiv.appendChild(btn);
                 });
                 showStatus('receiveStatus', `${receivedFiles.length} files received!`, 'success');
@@ -1126,6 +1285,8 @@
             if (conn) conn.close(); if (peer) peer.destroy();
             conn = null; peer = null; encryptionKey = null; receivedFiles = [];
             metadataReceived = false; // Reset for next transfer
+            resetDataQueue(); // Clear data queue
+            cleanupAllMemory(); // Full memory cleanup
             cleanupObjectURLs();
             document.getElementById('codeInput').value = '';
             document.getElementById('magnetInput').value = '';
@@ -1144,8 +1305,6 @@
         }
         
         // ==================== WEBTORRENT ====================
-        let activeTorrents = [];
-        
         // Default WebTorrent trackers for better connectivity
         const DEFAULT_TRACKERS = [
             'wss://tracker.openwebtorrent.com',
@@ -1238,7 +1397,7 @@
         
         function downloadTorrent() {
             const magnet = document.getElementById('magnetInput').value.trim();
-            if (!magnet || !magnet.startsWith('magnet:')) {
+            if (!magnet || !validateMagnetLink(magnet)) {
                 showStatus('receiveStatus', 'Please enter a valid magnet link', 'error');
                 return;
             }
@@ -1310,7 +1469,7 @@
                             btn.download = file.name;
                             btn.className = 'download-btn';
                             btn.style.marginTop = '8px';
-                            btn.innerHTML = `⬇️ ${file.name} (${formatSize(blob.size)})`;
+                            btn.innerHTML = `⬇️ ${escapeHtml(file.name)} (${formatSize(blob.size)})`;
                             multiFileDiv.appendChild(btn);
                         });
                     });
