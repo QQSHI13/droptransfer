@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'unsafe-inline' https://unpkg.com https://cdn.jsdelivr.net https://cdnjs.cloudflare.com; style-src 'self' 'unsafe-inline'; connect-src *; media-src blob:; img-src data: blob:;">
+    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'unsafe-inline' https://unpkg.com https://cdn.jsdelivr.net https://cdnjs.cloudflare.com; style-src 'self' 'unsafe-inline'; connect-src *; media-src blob:; img-src data: blob:; worker-src 'self';">
     <title>DropTransfer - Secure P2P File Sharing</title>
     <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Crect width='100' height='100' fill='%230d1117' rx='20'/%3E%3Ctext x='50' y='65' font-size='50' text-anchor='middle'%3E📦%3C/text%3E%3C/svg%3E">
     <script src="https://unpkg.com/peerjs@1.5.2/dist/peerjs.min.js"></script>
@@ -255,9 +255,9 @@
         (function() {
             if (!('serviceWorker' in navigator)) return;
             
-            // Detect hard reload (Ctrl+F5 or Cmd+Shift+R)
-            const isHardReload = performance.navigation.type === 1 && 
-                (performance.navigation.redirectCount === 0);
+            // Detect hard reload using PerformanceNavigationTiming API
+            const navEntry = performance.getEntriesByType('navigation')[0];
+            const isHardReload = navEntry && navEntry.type === 'reload';
             
             // Alternative: Check if page was loaded with cache-busting
             const navigationEntries = performance.getEntriesByType('navigation');
@@ -560,7 +560,7 @@
                 zip.file(f.path, fileData);
             }
             
-            // Generate zip blob
+            // Generate zip blob with error handling
             const zipBlob = await zip.generateAsync({
                 type: 'blob',
                 compression: 'DEFLATE',
@@ -569,9 +569,13 @@
                 // Update progress during zipping
                 document.getElementById('sendProgressText').textContent = 
                     `Zipping... ${Math.round(metadata.percent)}%`;
+            }).catch((err) => {
+                console.error('Zip generation failed:', err);
+                showStatus('sendStatus', 'Failed to create zip: ' + err.message, 'error');
+                return null;
             });
             
-            return zipBlob;
+            if (!zipBlob) return null;
         }
         
         // Extract zip file on receiver side
@@ -626,6 +630,12 @@
         };
         
         function initSender() {
+            // Guard to prevent multiple PeerJS instances
+            if (peer) {
+                console.log('Peer already initialized');
+                return;
+            }
+            
             console.log('Initializing sender peer...');
             showStatus('sendStatus', 'Creating peer connection...', 'info');
             
@@ -674,6 +684,12 @@
                 }
                 showStatus('sendStatus', msg + ' Try WebTorrent mode.', 'error');
                 document.getElementById('connectionWaiting').style.display = 'none';
+                
+                // Cleanup on sender peer errors
+                dataQueue.length = 0;
+                pendingAcks.clear();
+                isSending = false;
+                if (conn) { conn.close(); conn = null; }
             });
             
             peer.on('disconnected', () => {
@@ -856,21 +872,68 @@
                     await sendNextChunk();
                 }
                 
-                // Wait for all acknowledgments
+                // Wait for all acknowledgments with retry mechanism
                 const maxWaitTime = 60000; // 60 seconds timeout
-                const waitStart = Date.now();
-                let lastAckCount = pendingAcks.size;
-                while (pendingAcks.size > 0 && (Date.now() - waitStart) < maxWaitTime) {
-                    await new Promise(r => setTimeout(r, 100));
-                    // Log progress on ACK reduction
-                    if (pendingAcks.size !== lastAckCount) {
-                        console.log(`Waiting for ACKs: ${pendingAcks.size} remaining`);
-                        lastAckCount = pendingAcks.size;
+                const maxRetries = 3;
+                let retryCount = 0;
+                
+                while (pendingAcks.size > 0 && retryCount < maxRetries) {
+                    const waitStart = Date.now();
+                    let lastAckCount = pendingAcks.size;
+                    
+                    while (pendingAcks.size > 0 && (Date.now() - waitStart) < maxWaitTime) {
+                        await new Promise(r => setTimeout(r, 100));
+                        // Log progress on ACK reduction
+                        if (pendingAcks.size !== lastAckCount) {
+                            console.log(`Waiting for ACKs: ${pendingAcks.size} remaining`);
+                            lastAckCount = pendingAcks.size;
+                        }
+                    }
+                    
+                    if (pendingAcks.size > 0) {
+                        retryCount++;
+                        if (retryCount < maxRetries) {
+                            console.warn(`Retry ${retryCount}: ${pendingAcks.size} chunks unacknowledged, resending...`);
+                            // Resend unacknowledged chunks
+                            for (const [chunkKey, chunkInfo] of pendingAcks) {
+                                const { index, fileIndex: fi } = chunkInfo;
+                                const fileObj = filesToSend[fi];
+                                const start = index * CHUNK_SIZE;
+                                const end = Math.min(start + CHUNK_SIZE, fileObj.file.size);
+                                const chunk = fileObj.file.slice(start, end);
+                                
+                                let dataToSend = await chunk.arrayBuffer();
+                                let iv = null;
+                                
+                                if (encryptionKey) {
+                                    try {
+                                        iv = generateIV();
+                                        dataToSend = await encryptChunk(encryptionKey, dataToSend, iv);
+                                    } catch (err) {
+                                        console.error('Re-encryption failed:', err);
+                                        continue;
+                                    }
+                                }
+                                
+                                conn.send({
+                                    type: 'chunk',
+                                    data: dataToSend,
+                                    index: index,
+                                    total: Math.ceil(fileObj.file.size / CHUNK_SIZE),
+                                    iv: iv ? Array.from(iv) : null,
+                                    fileIndex: fi
+                                });
+                            }
+                        }
                     }
                 }
                 
                 if (pendingAcks.size > 0) {
-                    console.warn('Some chunks were not acknowledged:', pendingAcks.size, Array.from(pendingAcks.keys()));
+                    console.error('Max retries exceeded. Transfer failed.');
+                    showStatus('sendStatus', `Transfer failed: ${pendingAcks.size} chunks not acknowledged after ${maxRetries} retries`, 'error');
+                    isSending = false;
+                    document.getElementById('resetBtn').disabled = false;
+                    return; // Abort transfer
                 } else {
                     console.log(`All ${totalChunks} chunks acknowledged for file ${fileIndex}`);
                 }
@@ -890,6 +953,9 @@
             objectURLs.forEach(url => URL.revokeObjectURL(url));
             objectURLs = [];
         }
+
+        // Active torrents tracker for cleanup
+        let activeTorrents = [];
 
         function resetSender() {
             if (conn) conn.close();
@@ -1220,22 +1286,19 @@
         }
         
         // ==================== WEBTORRENT ====================
-        let activeTorrents = [];
+
         
-        // Default WebTorrent trackers for better connectivity
+        // Default WebTorrent trackers for better connectivity (WebSocket only for browser)
         const DEFAULT_TRACKERS = [
             'wss://tracker.openwebtorrent.com',
             'wss://tracker.files.fm:7073/announce',
-            'wss://spacetradersapi-chatbox.fly.dev:443/announce',
-            'udp://tracker.openbittorrent.com:80',
-            'udp://tracker.leechers-paradise.org:6969'
+            'wss://spacetradersapi-chatbox.fly.dev:443/announce'
         ];
         
         async function initTorrentSender() {
             if (!client) {
                 client = new WebTorrent({
                     tracker: {
-                        announce: DEFAULT_TRACKERS,
                         rtcConfig: {
                             iceServers: [
                                 { urls: 'stun:stun.l.google.com:19302' }
@@ -1265,10 +1328,10 @@
             
             showStatus('sendStatus', 'Creating torrent... (this may take a moment for large files)', 'info');
             
-            // Create torrent with trackers
+            // Create torrent with trackers - announceList is an array of arrays (tiered)
             const opts = {
                 name: torrentName,
-                announceList: [DEFAULT_TRACKERS]
+                announceList: DEFAULT_TRACKERS.map(t => [t])
             };
             
             client.seed(filesToSeed, opts, (torrent) => {
@@ -1322,7 +1385,11 @@
             if (!client) {
                 client = new WebTorrent({
                     tracker: {
-                        announce: DEFAULT_TRACKERS
+                        rtcConfig: {
+                            iceServers: [
+                                { urls: 'stun:stun.l.google.com:19302' }
+                            ]
+                        }
                     }
                 });
             }
@@ -1341,7 +1408,7 @@
                 }
             }, 30000);
             
-            client.add(magnet, { announce: DEFAULT_TRACKERS }, (torrent) => {
+            client.add(magnet, (torrent) => {
                 clearTimeout(connectionTimeout);
                 console.log('Downloading:', torrent.name);
                 showStatus('receiveStatus', `Found ${torrent.files.length} file(s). Connecting to peers...`, 'info');

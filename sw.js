@@ -97,15 +97,16 @@ self.addEventListener('fetch', (event) => {
         if (response) {
           // For navigation requests, also fetch fresh version in background
           if (event.request.mode === 'navigate') {
-            fetch(event.request).then(fetchResponse => {
+            const updateCache = fetch(event.request).then(fetchResponse => {
               if (fetchResponse.ok) {
-                caches.open(CACHE_NAME).then(cache => {
-                  cache.put(event.request, fetchResponse.clone());
+                return caches.open(CACHE_NAME).then(cache => {
+                  return cache.put(event.request, fetchResponse.clone());
                 });
               }
             }).catch(() => {
               // Ignore network errors for background fetch
             });
+            event.waitUntil(updateCache);
           }
           return response;
         }
@@ -119,9 +120,10 @@ self.addEventListener('fetch', (event) => {
           
           // Clone the response for caching
           const responseToCache = fetchResponse.clone();
-          caches.open(CACHE_NAME).then((cache) => {
-            cache.put(event.request, responseToCache);
+          const cachePromise = caches.open(CACHE_NAME).then((cache) => {
+            return cache.put(event.request, responseToCache);
           });
+          event.waitUntil(cachePromise);
           
           return fetchResponse;
         });
