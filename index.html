@@ -257,13 +257,6 @@
             
             // Track reload state in sessionStorage to prevent loops
             const RELOAD_COOLDOWN = 10000; // 10 second cooldown between reloads
-            let lastReloadTime = parseInt(sessionStorage.getItem('swLastReload') || '0');
-            const now = Date.now();
-            
-            // Prevent reload if we're within cooldown period
-            if (now - lastReloadTime < RELOAD_COOLDOWN) {
-                console.log('[SW] Reload cooldown active (' + Math.round((now - lastReloadTime)/1000) + 's ago), skipping SW activation checks');
-            }
             
             // Single flag to prevent multiple reloads
             let willReload = false;
@@ -271,12 +264,14 @@
             // Consolidated reload function with debounce
             function triggerReload(reason) {
                 if (willReload) return;
-                if (now - lastReloadTime < RELOAD_COOLDOWN) {
+                const currentTime = Date.now();
+                const lastReload = parseInt(sessionStorage.getItem('swLastReload') || '0');
+                if (currentTime - lastReload < RELOAD_COOLDOWN) {
                     console.log('[SW] Reload requested (' + reason + ') but cooldown active, skipping');
                     return;
                 }
                 willReload = true;
-                sessionStorage.setItem('swLastReload', Date.now().toString());
+                sessionStorage.setItem('swLastReload', currentTime.toString());
                 console.log('[SW] Reloading for: ' + reason);
                 window.location.reload();
             }
@@ -304,9 +299,11 @@
                 // Detect hard reload using PerformanceNavigationTiming API
                 const navEntry = performance.getEntriesByType('navigation')[0];
                 const isHardReload = navEntry && navEntry.type === 'reload';
+                const currentTime = Date.now();
+                const lastReload = parseInt(sessionStorage.getItem('swLastReload') || '0');
                 
                 // Handle hard reload - clear caches but don't reload
-                if (isHardReload && now - lastReloadTime >= RELOAD_COOLDOWN) {
+                if (isHardReload && currentTime - lastReload >= RELOAD_COOLDOWN) {
                     console.log('[SW] Hard reload detected, clearing caches...');
                     
                     // Tell SW to clear caches
@@ -481,6 +478,8 @@
         
         fileInput.addEventListener('change', async (e) => {
             const files = Array.from(e.target.files);
+            // Reset input so same files can be selected again
+            fileInput.value = '';
             if (files.length === 0) return;
             currentFiles = []; isFolderTransfer = false;
             for (const file of files) {
@@ -493,6 +492,8 @@
         // Handle folder selection
         folderInput.addEventListener('change', async (e) => {
             const files = Array.from(e.target.files);
+            // Reset input so same folder can be selected again
+            folderInput.value = '';
             if (files.length === 0) return;
             currentFiles = []; isFolderTransfer = true;
             for (const file of files) {
@@ -505,29 +506,46 @@
         });
         
         async function traverseEntry(entry, path) {
-            if (entry.isFile) {
-                return new Promise((resolve) => {
-                    entry.file(file => {
-                        currentFiles.push({ file: file, path: path + entry.name, relativePath: path + entry.name });
-                        resolve();
-                    });
-                });
-            } else if (entry.isDirectory) {
-                isFolderTransfer = true;
-                const dirReader = entry.createReader();
-                return new Promise((resolve, reject) => {
-                    const readEntries = () => {
-                        dirReader.readEntries(async (entries) => {
-                            if (entries.length === 0) { resolve(); return; }
-                            for (const subEntry of entries) await traverseEntry(subEntry, path + entry.name + '/');
-                            readEntries();
+            try {
+                if (entry.isFile) {
+                    return new Promise((resolve, reject) => {
+                        entry.file(file => {
+                            currentFiles.push({ file: file, path: path + entry.name, relativePath: path + entry.name });
+                            resolve();
                         }, (err) => {
-                            console.error('Error reading directory:', err);
+                            console.error('Error reading file:', entry.name, err);
+                            showStatus('sendStatus', 'Error reading file: ' + entry.name, 'error');
                             reject(err);
                         });
-                    };
-                    readEntries();
-                });
+                    });
+                } else if (entry.isDirectory) {
+                    isFolderTransfer = true;
+                    const dirReader = entry.createReader();
+                    return new Promise((resolve, reject) => {
+                        const readEntries = () => {
+                            dirReader.readEntries(async (entries) => {
+                                if (entries.length === 0) { resolve(); return; }
+                                for (const subEntry of entries) {
+                                    try {
+                                        await traverseEntry(subEntry, path + entry.name + '/');
+                                    } catch (err) {
+                                        console.error('Error traversing subdirectory:', err);
+                                    }
+                                }
+                                readEntries();
+                            }, (err) => {
+                                console.error('Error reading directory:', entry.name, err);
+                                showStatus('sendStatus', 'Error reading folder: ' + entry.name, 'error');
+                                reject(err);
+                            });
+                        };
+                        readEntries();
+                    });
+                }
+            } catch (err) {
+                console.error('traverseEntry error:', err);
+                showStatus('sendStatus', 'Error accessing files: ' + err.message, 'error');
+                throw err;
             }
         }
         
@@ -572,6 +590,8 @@
             }
             
             showStatus('sendStatus', 'Zipping files...', 'info');
+            document.getElementById('sendProgress').classList.add('show');
+            document.getElementById('sendProgressFill').style.width = '0%';
             const zip = new JSZip();
             
             // Add all files to zip with their relative paths
@@ -755,7 +775,8 @@
                     document.getElementById('resetBtn').textContent = '🔄 Send Another File';
                 } else if (data && data.type === 'ack') {
                     // Handle chunk acknowledgment
-                    pendingAcks.delete(data.chunkIndex + '-' + data.fileIndex);
+                    const ackKey = `${data.fileIndex}-${data.chunkIndex}`;
+                        pendingAcks.delete(ackKey);
                 }
             });
             
@@ -878,7 +899,7 @@
                     }
 
                     // Track this chunk for acknowledgment
-                    const chunkKey = i + '-' + fileIndex;
+                    const chunkKey = `${fileIndex}-${i}`;
                     pendingAcks.set(chunkKey, { index: i, fileIndex: fileIndex, retries: 0 });
 
                     // Send the chunk - convert to Uint8Array for reliable serialization
@@ -1001,6 +1022,12 @@
                 torrent.destroy();
             });
             activeTorrents = [];
+            
+            // Destroy WebTorrent client
+            if (client) {
+                client.destroy();
+                client = null;
+            }
             
             conn = null; peer = null; currentFiles = []; encryptionKey = null;
             isSending = false; // Reset sending flag
@@ -1144,12 +1171,17 @@
             if (isProcessingData) return;
             isProcessingData = true;
 
-            while (dataQueue.length > 0) {
-                const data = dataQueue.shift();
-                await handleDataInternal(data);
+            try {
+                while (dataQueue.length > 0) {
+                    const data = dataQueue.shift();
+                    await handleDataInternal(data);
+                }
+            } catch (err) {
+                console.error('Error processing data queue:', err);
+                showStatus('receiveStatus', 'Error processing data: ' + err.message, 'error');
+            } finally {
+                isProcessingData = false;
             }
-
-            isProcessingData = false;
         }
 
         function handleData(data) {
@@ -1211,9 +1243,8 @@
                         expectedChunkIndex++;
                     }
                 } else {
-                    // Out of order - cache it
+                    // Out of order - cache it (don't count size yet, will count when processed)
                     chunkCache.set(data.index, chunkData);
-                    receivedSize += chunkData.byteLength;
                 }
                 
                 // Send acknowledgment
@@ -1232,10 +1263,12 @@
                 document.getElementById('receiveProgressText').textContent = 
                     `Receiving... ${Math.round(progress)}% • ${speedStr} (${formatSize(receivedSize)} / ${formatSize(fileInfo.totalSize)})`;
             } else if (data.type === 'fileDone') {
-                // Process any remaining cached chunks
+                // Process any remaining cached chunks and update receivedSize
                 const remainingIndices = Array.from(chunkCache.keys()).sort((a, b) => a - b);
                 for (const idx of remainingIndices) {
-                    receivedChunks.push(chunkCache.get(idx));
+                    const cachedChunk = chunkCache.get(idx);
+                    receivedChunks.push(cachedChunk);
+                    receivedSize += cachedChunk.byteLength; // Count size when actually processing
                 }
                 chunkCache.clear();
                 
@@ -1244,30 +1277,34 @@
                 receivedChunks = [];
                 expectedChunkIndex = 0;
             } else if (data.type === 'done') {
-                // Check for missing chunks
-                const expectedTotalChunks = fileInfo.files.reduce((sum, f) => sum + Math.ceil(f.size / CHUNK_SIZE), 0);
-                const receivedTotalChunks = receivedChunks.length + chunkCache.size;
-                
+                // Process any remaining cached chunks for current file first
                 if (chunkCache.size > 0) {
-                    // Process remaining cached chunks
                     const remainingIndices = Array.from(chunkCache.keys()).sort((a, b) => a - b);
                     for (const idx of remainingIndices) {
-                        receivedChunks.push(chunkCache.get(idx));
+                        const cachedChunk = chunkCache.get(idx);
+                        receivedChunks.push(cachedChunk);
+                        receivedSize += cachedChunk.byteLength;
                     }
+                    chunkCache.clear();
                 }
                 
+                // Save current file if there's data
                 if (receivedChunks.length > 0) {
                     const blob = new Blob(receivedChunks);
                     receivedFiles.push({ blob, path: fileInfo.files[currentFileIndex].path, name: fileInfo.files[currentFileIndex].name });
                 }
                 
-                // Warn if chunks are missing
-                if (chunkCache.size > 0 || receivedTotalChunks < expectedTotalChunks) {
-                    console.warn(`Missing chunks detected. Expected: ${expectedTotalChunks}, Received: ${receivedTotalChunks}`);
-                    showStatus('receiveStatus', 'Warning: Some data may be missing. File could be corrupted.', 'warning');
-                }
+                // Validate we received all data
+                const expectedTotalSize = fileInfo.totalSize;
+                const sizeDiff = Math.abs(receivedSize - expectedTotalSize);
+                const sizeTolerance = CHUNK_SIZE; // Allow one chunk size tolerance
                 
-                finalizeTransfer();
+                if (sizeDiff > sizeTolerance) {
+                    console.warn(`Size mismatch: Expected ${expectedTotalSize}, received ${receivedSize}`);
+                    showStatus('receiveStatus', `Warning: Data size mismatch (${formatSize(sizeDiff)}). File may be corrupted.`, 'warning');
+                } else {
+                    finalizeTransfer();
+                }
             }
         }
         
@@ -1319,6 +1356,13 @@
         
         function resetReceiver() {
             if (conn) conn.close(); if (peer) peer.destroy();
+            
+            // Destroy WebTorrent client to stop any active downloads
+            if (client) {
+                client.destroy();
+                client = null;
+            }
+            
             conn = null; peer = null; encryptionKey = null; receivedFiles = [];
             metadataReceived = false; // Reset for next transfer
             cleanupObjectURLs();
@@ -1404,16 +1448,19 @@
                     }
                 };
                 
-                torrent.on('upload', updateUpload);
-                torrent.on('wire', (wire) => {
+                const onWire = (wire) => {
                     console.log('New peer connected:', wire.remoteAddress);
                     showStatus('sendStatus', `Peer connected! ${torrent.numPeers} peer(s) total`, 'success');
                     updateUpload();
-                });
+                };
+                
+                torrent.on('upload', updateUpload);
+                torrent.on('wire', onWire);
                 
                 // Store cleanup function on torrent for later
                 torrent._cleanup = () => {
                     torrent.off('upload', updateUpload);
+                    torrent.off('wire', onWire);
                 };
                 
                 document.getElementById('sendProgress').classList.add('show');
@@ -1435,6 +1482,12 @@
                 return;
             }
             
+            // Validate magnet link has required xt parameter (info hash)
+            if (!magnet.includes('xt=urn:btih:')) {
+                showStatus('receiveStatus', 'Invalid magnet link: missing info hash', 'error');
+                return;
+            }
+            
             if (!client) {
                 client = new WebTorrent({
                     tracker: {
@@ -1453,8 +1506,12 @@
             document.getElementById('transferModeIndicator').textContent = '🌐 Downloading via WebTorrent...';
             showStatus('receiveStatus', 'Connecting to peers... (this may take a moment)', 'info');
             
+            // Clear any existing downloads first
+            cleanupObjectURLs();
+            document.getElementById('multiFileDownloads').innerHTML = '';
+            
             // Add timeout for connection
-            let connectionTimeout = setTimeout(() => {
+            let torrentTimeout = setTimeout(() => {
                 if (document.getElementById('torrentBtn').disabled) {
                     showStatus('receiveStatus', 'Connection timeout. No peers found. Make sure the sender is online.', 'error');
                     document.getElementById('torrentBtn').disabled = false;
@@ -1462,7 +1519,7 @@
             }, 30000);
             
             client.add(magnet, (torrent) => {
-                clearTimeout(connectionTimeout);
+                clearTimeout(torrentTimeout);
                 console.log('Downloading:', torrent.name);
                 showStatus('receiveStatus', `Found ${torrent.files.length} file(s). Connecting to peers...`, 'info');
                 document.getElementById('receiveProgress').classList.add('show');
@@ -1472,6 +1529,7 @@
                 });
                 
                 torrent.on('error', (err) => {
+                    clearTimeout(torrentTimeout);
                     console.error('Torrent error:', err);
                     showStatus('receiveStatus', 'Download error: ' + err.message, 'error');
                     document.getElementById('torrentBtn').disabled = false;
@@ -1485,6 +1543,7 @@
                 });
                 
                 torrent.on('done', () => {
+                    clearTimeout(torrentTimeout);
                     console.log('Download complete');
                     document.getElementById('receiveProgress').classList.remove('show');
                     
@@ -1524,7 +1583,7 @@
             });
             
             client.on('error', (err) => {
-                clearTimeout(connectionTimeout);
+                clearTimeout(torrentTimeout);
                 console.error('WebTorrent client error:', err);
                 showStatus('receiveStatus', 'WebTorrent error: ' + err.message, 'error');
                 document.getElementById('torrentBtn').disabled = false;
