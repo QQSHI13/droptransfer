@@ -267,9 +267,20 @@
             let refreshing = false;
             
             // Listen for controller changes (new SW activated)
+            // Track last reload time to prevent infinite reload loops
+            let lastReloadTime = parseInt(sessionStorage.getItem('swLastReload') || '0');
+            const now = Date.now();
+            const RELOAD_COOLDOWN = 5000; // 5 second cooldown between reloads
+            
             navigator.serviceWorker.addEventListener('controllerchange', () => {
                 if (refreshing) return;
+                // Prevent infinite reload: only reload if cooldown has passed
+                if (now - lastReloadTime < RELOAD_COOLDOWN) {
+                    console.log('[SW] Controller changed but reload cooldown active, skipping reload');
+                    return;
+                }
                 refreshing = true;
+                sessionStorage.setItem('swLastReload', Date.now().toString());
                 console.log('[SW] Controller changed, reloading for fresh content...');
                 window.location.reload();
             });
@@ -352,7 +363,9 @@
         let pendingAcks = new Map(); // Track unacknowledged chunks
         let isSending = false; // Guard against re-entrant sendFiles
         let metadataReceived = false; // Guard against duplicate metadata
-        
+        let dataQueue = []; // Queue for incoming data chunks
+        let connectionTimeout = null; // Timeout for connection attempts
+
         function switchTab(tab, clickedBtn) {
             document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
             document.querySelectorAll('.tab-content').forEach(c => c.classList.remove('active'));
@@ -576,8 +589,9 @@
             });
             
             if (!zipBlob) return null;
+            return zipBlob;
         }
-        
+
         // Extract zip file on receiver side
         async function extractZip(blob, zipName) {
             showStatus('receiveStatus', 'Extracting files...', 'info');
@@ -997,7 +1011,6 @@
             document.getElementById('transferModeIndicator').className = 'transfer-mode-indicator webrtc';
             document.getElementById('transferModeIndicator').textContent = '🌐 Connecting via WebRTC...';
             
-            let connectionTimeout = null;
             let hasReceivedData = false;
             
             peer = new Peer({
@@ -1083,7 +1096,6 @@
         
         
         // Use Map for out-of-order chunk handling with concurrent transfers
-        const dataQueue = [];
         let isProcessingData = false;
         const chunkCache = new Map(); // Cache for out-of-order chunks
         let expectedChunkIndex = 0;
@@ -1114,6 +1126,7 @@
                 }
                 metadataReceived = true;
                 fileInfo = data;
+                fileInfo.receiveStartTime = performance.now(); // Initialize receive start time
                 receivedChunks = []; receivedSize = 0;
                 receivedFiles = [];
                 currentFileIndex = 0;
@@ -1475,6 +1488,18 @@
                 console.error('WebTorrent client error:', err);
                 showStatus('receiveStatus', 'WebTorrent error: ' + err.message, 'error');
                 document.getElementById('torrentBtn').disabled = false;
+            });
+        }
+        
+        // Cleanup connections on page unload
+        window.addEventListener('beforeunload', () => {
+            if (conn) conn.close();
+            if (peer) peer.destroy();
+            if (client) client.destroy();
+        });
+    </script>
+</body>
+</html>    document.getElementById('torrentBtn').disabled = false;
             });
         }
     </script>
