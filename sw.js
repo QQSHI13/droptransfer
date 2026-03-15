@@ -7,11 +7,7 @@ const urlsToCache = [
 // Track if this is a hard reload (cache bypass)
 let isHardReload = false;
 
-// Check for cache-busting headers or conditions that indicate a hard reload
 self.addEventListener('install', (event) => {
-  // Detect hard reload by checking if the install was triggered with cache bypass
-  const cacheBust = Date.now();
-  
   event.waitUntil(
     caches.open(CACHE_NAME)
       .then((cache) => {
@@ -20,6 +16,11 @@ self.addEventListener('install', (event) => {
       })
       .then(() => {
         // Always skip waiting for immediate activation
+        self.skipWaiting();
+      })
+      .catch((err) => {
+        console.error('[SW] Install failed:', err);
+        // Still skip waiting even if caching fails
         self.skipWaiting();
       })
   );
@@ -122,17 +123,34 @@ self.addEventListener('fetch', (event) => {
           const responseToCache = fetchResponse.clone();
           const cachePromise = caches.open(CACHE_NAME).then((cache) => {
             return cache.put(event.request, responseToCache);
+          }).catch((err) => {
+            console.error('[SW] Cache put failed:', err);
           });
           event.waitUntil(cachePromise);
           
           return fetchResponse;
+        }).catch((err) => {
+          console.error('[SW] Fetch failed:', err);
+          // Return offline fallback for navigation
+          if (event.request.mode === 'navigate') {
+            return caches.match('./');
+          }
+          throw err;
         });
       })
-      .catch(() => {
-        // Fallback for offline
+      .catch((err) => {
+        console.error('[SW] Cache match failed:', err);
+        // Fallback for offline navigation
         if (event.request.mode === 'navigate') {
-          return caches.match('./');
+          return caches.match('./').catch(() => {
+            // Ultimate fallback - return a simple response
+            return new Response('Offline - DropTransfer requires network', { 
+              status: 503, 
+              headers: { 'Content-Type': 'text/plain' } 
+            });
+          });
         }
+        throw err;
       })
   );
 });

@@ -255,35 +255,31 @@
         (function() {
             if (!('serviceWorker' in navigator)) return;
             
-            // Detect hard reload using PerformanceNavigationTiming API
-            const navEntry = performance.getEntriesByType('navigation')[0];
-            const isHardReload = navEntry && navEntry.type === 'reload';
-            
-            // Alternative: Check if page was loaded with cache-busting
-            const navigationEntries = performance.getEntriesByType('navigation');
-            const isCacheBypass = navigationEntries.length > 0 && 
-                navigationEntries[0].deliveryType === 'navigate';
-            
-            let refreshing = false;
-            
-            // Listen for controller changes (new SW activated)
-            // Track last reload time to prevent infinite reload loops
+            // Track reload state in sessionStorage to prevent loops
+            const RELOAD_COOLDOWN = 10000; // 10 second cooldown between reloads
             let lastReloadTime = parseInt(sessionStorage.getItem('swLastReload') || '0');
             const now = Date.now();
-            const RELOAD_COOLDOWN = 5000; // 5 second cooldown between reloads
             
-            navigator.serviceWorker.addEventListener('controllerchange', () => {
-                if (refreshing) return;
-                // Prevent infinite reload: only reload if cooldown has passed
+            // Prevent reload if we're within cooldown period
+            if (now - lastReloadTime < RELOAD_COOLDOWN) {
+                console.log('[SW] Reload cooldown active (' + Math.round((now - lastReloadTime)/1000) + 's ago), skipping SW activation checks');
+            }
+            
+            // Single flag to prevent multiple reloads
+            let willReload = false;
+            
+            // Consolidated reload function with debounce
+            function triggerReload(reason) {
+                if (willReload) return;
                 if (now - lastReloadTime < RELOAD_COOLDOWN) {
-                    console.log('[SW] Controller changed but reload cooldown active, skipping reload');
+                    console.log('[SW] Reload requested (' + reason + ') but cooldown active, skipping');
                     return;
                 }
-                refreshing = true;
+                willReload = true;
                 sessionStorage.setItem('swLastReload', Date.now().toString());
-                console.log('[SW] Controller changed, reloading for fresh content...');
+                console.log('[SW] Reloading for: ' + reason);
                 window.location.reload();
-            });
+            }
             
             // Handle messages from service worker
             navigator.serviceWorker.addEventListener('message', (event) => {
@@ -291,17 +287,26 @@
                     console.log('[SW] Service worker activated:', event.data.version);
                 }
                 if (event.data && event.data.type === 'CACHE_CLEARED') {
-                    console.log('[SW] Cache cleared, reloading...');
-                    window.location.reload();
+                    console.log('[SW] Cache cleared by request');
+                    // Don't auto-reload on CACHE_CLEARED - let controllerchange handle it
                 }
+            });
+            
+            // Listen for controller changes (new SW activated)
+            navigator.serviceWorker.addEventListener('controllerchange', () => {
+                triggerReload('controller change');
             });
             
             // Register service worker
             navigator.serviceWorker.register('./sw.js').then(registration => {
                 console.log('[SW] Registered:', registration.scope);
                 
-                // Handle hard reload - clear caches and refresh
-                if (isHardReload) {
+                // Detect hard reload using PerformanceNavigationTiming API
+                const navEntry = performance.getEntriesByType('navigation')[0];
+                const isHardReload = navEntry && navEntry.type === 'reload';
+                
+                // Handle hard reload - clear caches but don't reload
+                if (isHardReload && now - lastReloadTime >= RELOAD_COOLDOWN) {
                     console.log('[SW] Hard reload detected, clearing caches...');
                     
                     // Tell SW to clear caches
@@ -326,17 +331,16 @@
                     
                     newWorker.addEventListener('statechange', () => {
                         if (newWorker.state === 'installed' && navigator.serviceWorker.controller) {
-                            console.log('[SW] New version available, activating...');
-                            // New version ready, skip waiting
+                            console.log('[SW] New version available, skipping wait...');
                             newWorker.postMessage({ type: 'SKIP_WAITING' });
                         }
                     });
                 });
                 
-                // Check for updates periodically
+                // Check for updates periodically (but not too often)
                 setInterval(() => {
                     registration.update();
-                }, 60000); // Check every minute
+                }, 300000); // Check every 5 minutes instead of 1
                 
             }).catch(error => {
                 console.error('[SW] Registration failed:', error);
@@ -511,12 +515,15 @@
             } else if (entry.isDirectory) {
                 isFolderTransfer = true;
                 const dirReader = entry.createReader();
-                return new Promise((resolve) => {
+                return new Promise((resolve, reject) => {
                     const readEntries = () => {
                         dirReader.readEntries(async (entries) => {
                             if (entries.length === 0) { resolve(); return; }
                             for (const subEntry of entries) await traverseEntry(subEntry, path + entry.name + '/');
                             readEntries();
+                        }, (err) => {
+                            console.error('Error reading directory:', err);
+                            reject(err);
                         });
                     };
                     readEntries();
@@ -821,15 +828,37 @@
                 // Reset pending ACKs for this file
                 pendingAcks.clear();
                 
-                // Reliable chunk sending with backpressure
+                // Reliable chunk sending with backpressure - fixed to avoid race conditions
                 const MAX_BUFFER = 8388608; // 8MB buffer threshold
                 const MAX_IN_FLIGHT = 32; // Max chunks without acknowledgment
-                let chunkIndex = 0;
                 
-                const sendNextChunk = async () => {
-                    const i = chunkIndex++;
+                // Pre-calculate all chunks to send
+                const chunksToSend = [];
+                for (let i = 0; i < totalChunks; i++) {
                     const start = i * CHUNK_SIZE;
                     const end = Math.min(start + CHUNK_SIZE, buffer.byteLength);
+                    chunksToSend.push({ index: i, start, end });
+                }
+                
+                let nextChunkIdx = 0;
+                
+                // Send chunks with proper backpressure control
+                while (nextChunkIdx < totalChunks) {
+                    // Wait if buffer is too full or too many unacknowledged chunks
+                    while (conn && conn.open && (
+                        (conn.dataChannel && conn.dataChannel.bufferedAmount > MAX_BUFFER) || 
+                        pendingAcks.size >= MAX_IN_FLIGHT
+                    )) {
+                        await new Promise(r => setTimeout(r, 10));
+                    }
+                    
+                    // Check connection is still open
+                    if (!conn || !conn.open) {
+                        throw new Error('Connection closed during send');
+                    }
+                    
+                    const chunkInfo = chunksToSend[nextChunkIdx];
+                    const { index: i, start, end } = chunkInfo;
                     
                     // Slice the chunk
                     let chunk = buffer.slice(start, end);
@@ -852,10 +881,10 @@
                     const chunkKey = i + '-' + fileIndex;
                     pendingAcks.set(chunkKey, { index: i, fileIndex: fileIndex, retries: 0 });
 
-                    // Send the chunk
+                    // Send the chunk - convert to Uint8Array for reliable serialization
                     conn.send({ 
                         type: 'chunk', 
-                        data: chunk, 
+                        data: new Uint8Array(chunk), 
                         index: i, 
                         total: totalChunks, 
                         iv: iv ? Array.from(iv) : null,
@@ -863,6 +892,7 @@
                     });
                     
                     totalBytesSent += (end - start);
+                    nextChunkIdx++;
                     
                     const progress = (totalBytesSent / totalBytes) * 100;
                     const elapsed = (performance.now() - startTime) / 1000;
@@ -874,20 +904,10 @@
                     document.getElementById('sendProgressFill').style.width = progress + '%';
                     document.getElementById('sendProgressText').textContent = 
                         `Sending ${file.name}... ${Math.round(progress)}% • ${speedStr} • ${pendingAcks.size} pending`;
-                };
-
-                // Process chunks with backpressure control
-                while (chunkIndex < totalChunks) {
-                    // Wait if buffer is too full or too many unacknowledged chunks
-                    while (conn.dataChannel && (conn.dataChannel.bufferedAmount > MAX_BUFFER || pendingAcks.size >= MAX_IN_FLIGHT)) {
-                        await new Promise(r => setTimeout(r, 10));
-                    }
-                    
-                    await sendNextChunk();
                 }
                 
                 // Wait for all acknowledgments with retry mechanism
-                const maxWaitTime = 60000; // 60 seconds timeout
+                const maxWaitTime = 30000; // 30 seconds timeout per retry cycle
                 const maxRetries = 3;
                 let retryCount = 0;
                 
@@ -910,11 +930,11 @@
                             console.warn(`Retry ${retryCount}: ${pendingAcks.size} chunks unacknowledged, resending...`);
                             // Resend unacknowledged chunks
                             for (const [chunkKey, chunkInfo] of pendingAcks) {
-                                const { index, fileIndex: fi } = chunkInfo;
-                                const fileObj = filesToSend[fi];
-                                const start = index * CHUNK_SIZE;
-                                const end = Math.min(start + CHUNK_SIZE, fileObj.file.size);
-                                const chunk = fileObj.file.slice(start, end);
+                                const { index: chunkIdx, fileIndex: targetFileIdx } = chunkInfo;
+                                const targetFileObj = filesToSend[targetFileIdx];
+                                const start = chunkIdx * CHUNK_SIZE;
+                                const end = Math.min(start + CHUNK_SIZE, targetFileObj.file.size);
+                                const chunk = targetFileObj.file.slice(start, end);
                                 
                                 let dataToSend = await chunk.arrayBuffer();
                                 let iv = null;
@@ -931,11 +951,11 @@
                                 
                                 conn.send({
                                     type: 'chunk',
-                                    data: dataToSend,
-                                    index: index,
-                                    total: Math.ceil(fileObj.file.size / CHUNK_SIZE),
+                                    data: new Uint8Array(dataToSend), // Convert to Uint8Array for reliable serialization
+                                    index: chunkIdx,
+                                    total: Math.ceil(targetFileObj.file.size / CHUNK_SIZE),
                                     iv: iv ? Array.from(iv) : null,
-                                    fileIndex: fi
+                                    fileIndex: targetFileIdx
                                 });
                             }
                         }
@@ -1012,6 +1032,7 @@
             document.getElementById('transferModeIndicator').textContent = '🌐 Connecting via WebRTC...';
             
             let hasReceivedData = false;
+            let localConnectionTimeout = null;
             
             peer = new Peer({
                 config: ICE_CONFIG,
@@ -1032,7 +1053,10 @@
 
                 conn.on('open', async () => {
                     console.log('Receiver: Connection opened!');
-                    if (connectionTimeout) clearTimeout(connectionTimeout);
+                    if (localConnectionTimeout) {
+                        clearTimeout(localConnectionTimeout);
+                        localConnectionTimeout = null;
+                    }
                     showStatus('receiveStatus', 'Connected! Waiting for file...', 'success');
                     document.getElementById('transferModeIndicator').textContent = '🔒 Encrypted WebRTC connection';
                     document.getElementById('receiveProgress').classList.add('show');
@@ -1050,23 +1074,39 @@
                     // Clear timeout on first data received
                     if (!hasReceivedData) {
                         hasReceivedData = true;
-                        if (connectionTimeout) clearTimeout(connectionTimeout);
+                        if (localConnectionTimeout) {
+                            clearTimeout(localConnectionTimeout);
+                            localConnectionTimeout = null;
+                        }
                     }
                     handleData(data);
                 });
                 
                 conn.on('error', (err) => {
                     console.error('Connection error:', err);
+                    if (localConnectionTimeout) {
+                        clearTimeout(localConnectionTimeout);
+                        localConnectionTimeout = null;
+                    }
                     showStatus('receiveStatus', 'Connection error: ' + err.message, 'error');
                     document.getElementById('connectBtn').disabled = false;
                 });
                 
-                conn.on('close', () => console.log('Connection closed'));
+                conn.on('close', () => {
+                    console.log('Connection closed');
+                    if (localConnectionTimeout) {
+                        clearTimeout(localConnectionTimeout);
+                        localConnectionTimeout = null;
+                    }
+                });
             });
             
             peer.on('error', (err) => {
                 console.error('Peer error:', err);
-                if (connectionTimeout) clearTimeout(connectionTimeout);
+                if (localConnectionTimeout) {
+                    clearTimeout(localConnectionTimeout);
+                    localConnectionTimeout = null;
+                }
                 
                 let msg = 'Connection failed';
                 if (err.type === 'peer-unavailable') msg = 'Sender not found. Check the code or try WebTorrent mode.';
@@ -1082,7 +1122,7 @@
             });
             
             // Connection timeout - will be cleared when connection opens or data arrives
-            connectionTimeout = setTimeout(() => {
+            localConnectionTimeout = setTimeout(() => {
                 if (!conn || !conn.open || !hasReceivedData) {
                     showStatus('receiveStatus', 'Connection timeout. Try WebTorrent mode.', 'error');
                     document.getElementById('transferModeIndicator').className = 'transfer-mode-indicator webtorrent';
