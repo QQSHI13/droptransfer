@@ -531,16 +531,25 @@
                     isFolderTransfer = true;
                     const dirReader = entry.createReader();
                     return new Promise((resolve, reject) => {
+                        const allEntries = []; // Accumulate all entries across batches
                         const readEntries = () => {
                             dirReader.readEntries(async (entries) => {
-                                if (entries.length === 0) { resolve(); return; }
-                                for (const subEntry of entries) {
+                                if (entries.length === 0) {
+                                    // All batches read, now process all entries
                                     try {
-                                        await traverseEntry(subEntry, path + entry.name + '/');
+                                        for (const subEntry of allEntries) {
+                                            await traverseEntry(subEntry, path + entry.name + '/');
+                                        }
+                                        resolve();
                                     } catch (err) {
-                                        console.error('Error traversing subdirectory:', err);
+                                        console.error('Error processing directory entries:', err);
+                                        reject(err);
                                     }
+                                    return;
                                 }
+                                // Accumulate entries from this batch
+                                allEntries.push(...entries);
+                                // Continue reading next batch
                                 readEntries();
                             }, (err) => {
                                 console.error('Error reading directory:', entry.name, err);
@@ -605,8 +614,14 @@
             
             // Add all files to zip with their relative paths
             for (const f of currentFiles) {
-                const fileData = await f.file.arrayBuffer();
-                zip.file(f.path, fileData);
+                try {
+                    const fileData = await f.file.arrayBuffer();
+                    zip.file(f.path, fileData);
+                } catch (err) {
+                    console.error('Error adding file to zip:', f.path, err);
+                    showStatus('sendStatus', 'Error adding file to zip: ' + f.path, 'error');
+                    return null;
+                }
             }
             
             // Generate zip blob with error handling
@@ -960,6 +975,14 @@
                             console.warn(`Retry ${retryCount}: ${pendingAcks.size} chunks unacknowledged, resending...`);
                             // Resend unacknowledged chunks
                             for (const [chunkKey, chunkInfo] of pendingAcks) {
+                                // Check connection is still open before each send
+                                if (!conn || !conn.open) {
+                                    console.error('Connection closed during retry');
+                                    isSending = false;
+                                    document.getElementById('resetBtn').disabled = false;
+                                    return;
+                                }
+                                
                                 const { index: chunkIdx, fileIndex: targetFileIdx } = chunkInfo;
                                 const targetFileObj = filesToSend[targetFileIdx];
                                 const start = chunkIdx * CHUNK_SIZE;
@@ -1224,7 +1247,27 @@
                 expectedChunkIndex = 0;
                 chunkCache.clear();
             } else if (data.type === 'chunk') {
+                // Validate chunk data exists
+                if (!data.data || !(data.data instanceof ArrayBuffer || data.data.byteLength === undefined)) {
+                    console.error('Invalid chunk data received');
+                    showStatus('receiveStatus', 'Error: Invalid chunk data received', 'error');
+                    return;
+                }
+                
                 let chunkData = data.data;
+                
+                // Validate that adding this chunk won't exceed expected total size
+                const expectedFileSize = fileInfo.files[data.fileIndex]?.size || 0;
+                const maxAllowedSize = expectedFileSize + CHUNK_SIZE; // Allow one chunk tolerance for padding
+                const projectedSize = receivedSize + chunkData.byteLength + 
+                    Array.from(chunkCache.values()).reduce((sum, chunk) => sum + chunk.byteLength, 0);
+                
+                if (projectedSize > maxAllowedSize) {
+                    console.error(`Size validation failed: projected ${projectedSize} exceeds max allowed ${maxAllowedSize}`);
+                    showStatus('receiveStatus', 'Error: Received data exceeds expected file size', 'error');
+                    return;
+                }
+                
                 if (encryptionKey && data.iv) {
                     try {
                         const iv = new Uint8Array(data.iv);
@@ -1372,6 +1415,12 @@
                 client = null;
             }
             
+            // Clear data queue and processing flag to prevent stale data
+            dataQueue.length = 0;
+            isProcessingData = false;
+            chunkCache.clear();
+            expectedChunkIndex = 0;
+            
             conn = null; peer = null; encryptionKey = null; receivedFiles = [];
             metadataReceived = false; // Reset for next transfer
             cleanupObjectURLs();
@@ -1402,6 +1451,13 @@
         ];
         
         async function initTorrentSender() {
+            // Clean up existing torrents before creating new ones (prevent memory leak)
+            activeTorrents.forEach(torrent => {
+                if (torrent._cleanup) torrent._cleanup();
+                torrent.destroy();
+            });
+            activeTorrents = [];
+            
             if (!client) {
                 client = new WebTorrent({
                     tracker: {
