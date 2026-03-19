@@ -1,114 +1,83 @@
 # DropTransfer 📦
 
-Simple P2P file sharing. No upload limits, no server storage—files transfer directly between browsers using WebRTC.
+Peer-to-peer file sharing in your browser. No servers, no accounts, no file size limits.
 
-**Live**: https://qqshi13.github.io/droptransfer/
-
----
+![DropTransfer Demo](demo.gif)
 
 ## ✨ Features
 
-### Core Features
-- **🔗 True P2P** — Direct browser-to-browser transfer via WebRTC
-- **📁 Any File Size** — Chunked transfer handles large files without memory issues
-- **📱 Simple Codes** — Auto-generated PeerJS IDs for easy sharing
-- **📊 Progress Tracking** — Real-time transfer percentage and speed
-- **🔄 Retry Logic** — Auto-reconnect on connection failures
+- **🔒 P2P Transfer** — Files go directly from sender to receiver, no middleman
+- **📁 Any File Size** — Limited only by your browser's memory
+- **🔐 Encrypted** — All transfers use WebRTC's built-in encryption
+- **📱 Cross-Platform** — Works on desktop and mobile browsers
+- **🎯 Simple UI** — Drag, drop, share. That's it.
+- **⚡ Fast** — Direct connection means maximum speed
 
-### Security & Privacy
-- **🔒 End-to-End Encrypted** — WebRTC's built-in DTLS encryption
-- **🚫 No Server Storage** — Files never touch a server
-- **📋 CSP Protected** — Content Security Policy for added safety
+## 🚀 Quick Start
 
-### UX Features
-- **🌙 Dark Theme** — Easy on the eyes
-- **📦 ZIP Support** — Automatically packages multiple files
-- **💬 Chat** — Send messages while transferring
-- **📱 Mobile Friendly** — Works on phones and tablets
+### Try it now
+**Live Demo:** https://qqshi13.github.io/droptransfer/
 
----
+### How it works
+1. **Sender:** Drag files into the drop zone
+2. **Share:** Copy the generated link or QR code
+3. **Receiver:** Open the link on another device
+4. **Transfer:** Files download automatically
 
-## 🚀 How It Works
+## 🛠️ Tech Stack
 
-DropTransfer uses **WebRTC** (Web Real-Time Communication) to establish a direct peer-to-peer connection between sender and receiver:
+- **Frontend:** HTML5, CSS3, JavaScript
+- **P2P:** WebRTC DataChannels
+- **Signaling:** Custom lightweight server (for connection setup only)
+- **Encryption:** DTLS (built into WebRTC)
 
-1. **Sender** opens the app and gets a unique code
-2. **Receiver** enters the code to establish connection
-3. **WebRTC** creates a direct encrypted connection
-4. **Files** are chunked and streamed directly between browsers
-5. **No server** ever sees your file contents
+## 📖 How It Works
 
----
+DropTransfer uses WebRTC to establish a direct peer-to-peer connection between the sender and receiver. Files are chunked and streamed directly from one browser to another, never touching our servers.
 
-## 📥 Usage
+### The Process
+1. Sender generates a unique session ID
+2. Signaling server helps peers find each other
+3. WebRTC establishes direct connection
+4. Files are chunked (1MB each) and transferred
+5. Receiver's browser reassembles the file
 
-### Sending Files
-1. Open [DropTransfer](https://qqshi13.github.io/droptransfer/)
-2. Select files or drag & drop onto the page
-3. Share the generated code with the recipient
-4. Wait for them to connect and download
+## 📝 Why I Built This
 
-### Receiving Files
-1. Open [DropTransfer](https://qqshi13.github.io/droptransfer/)
-2. Click "Receive" and enter the sender's code
-3. Accept the connection
-4. Files download automatically
+I needed to send a large video file to a friend, but:
+- Email had a 25MB limit
+- WeTransfer required an account
+- Google Drive was too slow
 
----
+So I built DropTransfer — no accounts, no limits, just works.
 
-## 🛠️ Technologies
+## 🐛 Known Issues
 
-- **P2P**: WebRTC DataChannels via [PeerJS](https://peerjs.com/)
-- **Torrent**: WebTorrent for alternative transfer method
-- **Compression**: JSZip for multi-file packaging
-- **Security**: Content Security Policy (CSP)
-- **Frontend**: Vanilla HTML5, CSS3, JavaScript
+- Requires modern browsers (Chrome, Firefox, Edge)
+- Both peers must keep the tab open during transfer
+- Mobile browsers may have stricter background tab policies
 
----
+## 🔮 Future Plans
 
-## 📦 Installation (Self-Host)
+- [ ] Folder transfer support
+- [ ] Resume interrupted transfers
+- [ ] End-to-end encryption with custom keys
+- [ ] Self-hosted signaling server option
 
-```bash
-# Clone the repository
-git clone https://github.com/QQSHI13/droptransfer.git
+## ⚠️ Security Note
 
-# Open in browser
-cd droptransfer
-# Open index.html in your browser
-```
+While WebRTC provides encryption in transit, the initial signaling goes through our server. For maximum privacy, you can self-host the signaling server (see `docs/self-host.md`).
 
----
+## 📄 License
 
-## ⚠️ Limitations
-
-- Both sender and receiver must have the app open
-- Large files may take time depending on connection speed
-- Some corporate firewalls may block WebRTC
-- Files are transferred in memory—very large files may require chunked mode
-
----
-
-## 🔒 Privacy
-
-- No account required
-- No file metadata stored
-- Direct peer-to-peer connection
-- Files are encrypted in transit via DTLS
-
----
-
-## 📝 License
-
-This project is licensed under the **GNU General Public License v3.0 (GPL-3.0)**.
-
-See [LICENSE](./LICENSE) for details.
-
----
+This project is licensed under the [GPL-3.0 License](LICENSE).
 
 ## 🙏 Credits
 
-Built with ❤️ by **QQ** and **Nova** ☄️
+Built with ❤️ by [QQ](https://github.com/QQSHI13) & [Nova ☄️](https://openclaw.ai)
 
 Powered by [OpenClaw](https://openclaw.ai)
 
-Uses [PeerJS](https://peerjs.com/) for WebRTC signaling.
+---
+
+**⭐ Star this repo if you find it useful!**
