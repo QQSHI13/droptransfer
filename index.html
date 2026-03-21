@@ -10,6 +10,16 @@
 
  gtag('config', 'G-3PSNCFVT76');
 </script>
+<script>
+  // GitHub Pages SPA redirect handler
+  (function() {
+    var redirect = sessionStorage.getItem('gh-spa-redirect');
+    if (redirect) {
+      sessionStorage.removeItem('gh-spa-redirect');
+      history.replaceState(null, null, redirect);
+    }
+  })();
+</script>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'unsafe-inline' https://unpkg.com https://cdn.jsdelivr.net https://cdnjs.cloudflare.com; style-src 'self' 'unsafe-inline'; connect-src *; media-src blob:; img-src data: blob:; worker-src 'self';">
