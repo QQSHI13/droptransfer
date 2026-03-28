@@ -195,4 +195,4 @@ socket.on('signal', data => peer.signal(data));
 - Real-time (no polling delay)
 - Can host on free tiers (Render, Railway, Fly.io)
 
-Want me to build a complete working signaling server for QuickShare?
+Want me to build a complete working signaling server for droptransfer?
