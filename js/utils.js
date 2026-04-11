@@ -109,16 +109,30 @@ export function formatSpeed(bytes, msElapsed) {
 /**
  * Deep clone an object (for state snapshots)
  * @param {*} obj - Object to clone
+ * @param {WeakMap} seen - WeakMap to track circular references
  * @returns {*} Cloned object
  */
-export function deepClone(obj) {
+export function deepClone(obj, seen = new WeakMap()) {
     if (obj === null || typeof obj !== 'object') return obj;
     if (obj instanceof Date) return new Date(obj);
-    if (Array.isArray(obj)) return obj.map(deepClone);
+    if (obj instanceof RegExp) return new RegExp(obj);
+    if (obj instanceof Map) return new Map(Array.from(obj.entries(), ([k, v]) => [k, deepClone(v, seen)]));
+    if (obj instanceof Set) return new Set(Array.from(obj.values(), v => deepClone(v, seen)));
+
+    // Handle circular references
+    if (seen.has(obj)) return seen.get(obj);
+
+    if (Array.isArray(obj)) {
+        const cloned = obj.map(item => deepClone(item, seen));
+        seen.set(obj, cloned);
+        return cloned;
+    }
+
     const cloned = {};
+    seen.set(obj, cloned);
     for (const key in obj) {
         if (obj.hasOwnProperty(key)) {
-            cloned[key] = deepClone(obj[key]);
+            cloned[key] = deepClone(obj[key], seen);
         }
     }
     return cloned;

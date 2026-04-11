@@ -136,7 +136,8 @@ class StateManager {
                 oldValue = oldValue?.[key];
             }
 
-            if (JSON.stringify(newValue) !== JSON.stringify(lastValue)) {
+            const hasChanged = !this._deepEqual(newValue, lastValue);
+            if (hasChanged) {
                 lastValue = deepClone(newValue);
                 callback(newValue, oldValue);
             }
@@ -210,16 +211,46 @@ class StateManager {
         }
     }
 
-    _deepMerge(target, source) {
-        const result = { ...target };
+    _deepMerge(target, source, seen = new WeakMap()) {
+        // Handle arrays - replace, don't merge
+        if (Array.isArray(source)) {
+            return source.map(item => deepClone(item, seen));
+        }
+        if (Array.isArray(target)) {
+            return target;
+        }
+
+        const result = deepClone(target, seen);
         for (const key in source) {
-            if (source[key] && typeof source[key] === 'object' && !Array.isArray(source[key])) {
-                result[key] = this._deepMerge(target[key] || {}, source[key]);
-            } else {
-                result[key] = source[key];
+            if (source.hasOwnProperty(key)) {
+                if (source[key] && typeof source[key] === 'object' && !Array.isArray(source[key])) {
+                    result[key] = this._deepMerge(result[key] || {}, source[key], seen);
+                } else {
+                    result[key] = deepClone(source[key], seen);
+                }
             }
         }
         return result;
+    }
+
+    _deepEqual(a, b) {
+        if (a === b) return true;
+        if (typeof a !== typeof b) return false;
+        if (typeof a !== 'object' || a === null || b === null) return false;
+        if (Array.isArray(a) !== Array.isArray(b)) return false;
+
+        if (Array.isArray(a)) {
+            if (a.length !== b.length) return false;
+            return a.every((item, i) => this._deepEqual(item, b[i]));
+        }
+
+        const keysA = Object.keys(a);
+        const keysB = Object.keys(b);
+        if (keysA.length !== keysB.length) return false;
+
+        return keysA.every(key =>
+            keysB.includes(key) && this._deepEqual(a[key], b[key])
+        );
     }
 }
 
