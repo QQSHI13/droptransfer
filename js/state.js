@@ -174,6 +174,8 @@ class StateManager {
             connectionState: 'disconnected',
             transferState: 'idle',
             errorMessage: null,
+            sendMode: 'direct',
+            recvMode: 'direct',
             progress: {
                 bytesTransferred: 0,
                 totalBytes: 0,
