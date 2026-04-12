@@ -1,6 +1,7 @@
 import state from './state.js';
 import { isValidCode, formatSize } from './utils.js';
 import { PeerJSTransfer } from './transfers/peerjs.js';
+import { WebTorrentTransfer } from './transfers/webtorrent.js';
 import { DragDropHandler } from './ui/dragdrop.js';
 import {
     FileListComponent,
@@ -17,6 +18,7 @@ import {
 class DropTransferApp {
     constructor() {
         this.peerTransfer = new PeerJSTransfer();
+        this.webtorrentTransfer = new WebTorrentTransfer();
         this.dragDrop = null;
         this.fileList = null;
         this.progress = null;
@@ -102,9 +104,11 @@ class DropTransferApp {
         this.fileList.render(files, isFolder);
         this.sendStatus.info(`${files.length} file(s) selected (${formatSize(totalSize)})`);
 
-        // Auto-init sender for direct mode
-        if (state.get().sendMode === 'direct') {
+        const sendMode = state.get().sendMode;
+        if (sendMode === 'direct') {
             this.initSender();
+        } else if (sendMode === 'torrent') {
+            this.initTorrentSender();
         }
     }
 
@@ -199,8 +203,79 @@ class DropTransferApp {
         );
     }
 
+    async initTorrentSender() {
+        const files = state.get().selectedFiles;
+        if (!files.length) {
+            this.sendStatus.error('Please select files first');
+            return;
+        }
+
+        this.sendStatus.info('Creating torrent...');
+        this.progress.show();
+
+        this.webtorrentTransfer.seed(
+            files,
+            (uploaded, total, speed) => {
+                const percent = total > 0 ? (uploaded / total) * 100 : 0;
+                this.progress.update(percent, `Seeding... ${formatSize(speed)}/s`);
+            },
+            (magnetURI) => {
+                document.getElementById('magnetLink').textContent = magnetURI;
+                document.getElementById('magnetBox').classList.add('show');
+                this.sendStatus.success('Torrent ready! Share the magnet link');
+                document.getElementById('resetBtn').style.display = 'block';
+            },
+            (err) => {
+                this.sendStatus.error('Failed to create torrent: ' + err.message);
+            }
+        );
+    }
+
+    async downloadTorrent() {
+        const magnet = document.getElementById('magnetInput').value.trim();
+
+        if (!magnet) {
+            this.recvStatus.error('Please enter a magnet link');
+            return;
+        }
+
+        document.getElementById('torrentBtn').disabled = true;
+        this.recvStatus.info('Connecting to peers...');
+        this.modeIndicator.showWebTorrent();
+        this.progress.show();
+
+        this.webtorrentTransfer.download(
+            magnet,
+            (downloaded, total, speed) => {
+                const percent = total > 0 ? (downloaded / total) * 100 : 0;
+                this.progress.update(percent, `Downloading... ${Math.round(percent)}% • ${formatSize(speed)}/s`);
+            },
+            async (files) => {
+                this.recvStatus.success('Download complete!');
+
+                const fileBlobs = await Promise.all(
+                    files.map(async (f) => ({
+                        name: f.name,
+                        blob: await f.getBlob(),
+                        size: f.size
+                    }))
+                );
+
+                this.downloadManager.createDownload(fileBlobs);
+                document.getElementById('torrentBtn').disabled = false;
+                document.getElementById('retryBtn').style.display = 'block';
+            },
+            (err) => {
+                this.recvStatus.error(err.message);
+                document.getElementById('torrentBtn').disabled = false;
+                document.getElementById('retryBtn').style.display = 'block';
+            }
+        );
+    }
+
     handleReset() {
         this.peerTransfer.cleanup();
+        this.webtorrentTransfer.cleanup();
         this.dragDrop.reset();
         this.fileList.clear();
         this.progress.reset();
@@ -243,6 +318,9 @@ window.setRecvMode = (mode) => {
     document.getElementById('directReceiveSection').style.display = mode === 'direct' ? 'block' : 'none';
     document.getElementById('torrentReceiveSection').style.display = mode === 'torrent' ? 'block' : 'none';
 };
+
+window.initTorrentSender = () => app.initTorrentSender();
+window.downloadTorrent = () => app.downloadTorrent();
 
 // Initialize app
 let app;
