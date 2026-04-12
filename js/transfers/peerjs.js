@@ -302,25 +302,29 @@ export class PeerJSTransfer {
         this.conn.serialization = 'binary';
         this.conn.reliable = true;
 
-        // Derive encryption key
+        // Derive encryption key before accepting data
         deriveKey(this.peer.id, connection.peer)
             .then(key => {
                 this.encryptionKey = key;
                 console.log('[PeerJS] Encryption established');
+
+                // Now safe to accept data
+                this.conn.on('data', (data) => this._handleData(data));
             })
             .catch(err => {
                 console.error('[PeerJS] Key derivation failed:', err);
+                this.conn.on('data', (data) => this._handleData(data));
             });
 
-        this.conn.on('data', (data) => this._handleData(data));
-
         this.conn.on('error', (err) => {
+            clearTimeout(this.connectionTimeout);
             console.error('[PeerJS] Connection error:', err);
             state.set({ connectionState: 'error', errorMessage: err.message });
             onError?.(err);
         });
 
         this.conn.on('close', () => {
+            clearTimeout(this.connectionTimeout);
             console.log('[PeerJS] Connection closed');
             state.set({ connectionState: 'disconnected' });
         });
@@ -337,11 +341,11 @@ export class PeerJSTransfer {
 
             try {
                 this.encryptionKey = await deriveKey(code, this.peer.id);
+                this.conn.send('ready');
             } catch (err) {
                 console.error('[PeerJS] Key derivation failed:', err);
+                this.conn.send('ready'); // Continue unencrypted if key fails
             }
-
-            this.conn.send('ready');
         });
 
         this.conn.on('data', (data) => {
@@ -430,6 +434,9 @@ export class PeerJSTransfer {
             const waitStart = Date.now();
 
             while (this.pendingAcks.size > 0 && (Date.now() - waitStart) < ACK_TIMEOUT) {
+                if (!this.conn?.open) {
+                    throw new Error('Connection closed while waiting for acknowledgments');
+                }
                 await new Promise(r => setTimeout(r, 100));
             }
 
@@ -569,6 +576,7 @@ export class PeerJSTransfer {
                 chunkData = await decryptChunk(this.encryptionKey, chunkData, iv);
             } catch (err) {
                 console.error('[PeerJS] Decryption failed:', err);
+                this.conn?.send({ type: 'error', message: 'Decryption failed' });
                 return;
             }
         }
