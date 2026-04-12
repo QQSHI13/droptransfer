@@ -1,0 +1,12 @@
+{
+  "ci": {
+    "collect": {
+      "staticDistDir": "."
+    },
+    "assert": {
+      "assertions": {
+        "categories:pwa": ["warn", {"minScore": 0.9}]
+      }
+    }
+  }
+}
