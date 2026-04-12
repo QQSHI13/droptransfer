@@ -149,10 +149,17 @@ export class ProgressComponent {
 export class StatusComponent {
     constructor(elementId) {
         this.element = document.getElementById(elementId);
+        this._timeoutId = null;
     }
 
     show(message, type = 'info', duration = null) {
         if (!this.element) return;
+
+        // Clear existing timeout
+        if (this._timeoutId) {
+            clearTimeout(this._timeoutId);
+            this._timeoutId = null;
+        }
 
         this.element.textContent = message;
         this.element.className = `status show ${type}`;
@@ -162,11 +169,15 @@ export class StatusComponent {
         this.element.setAttribute('aria-live', type === 'error' ? 'assertive' : 'polite');
 
         if (duration) {
-            setTimeout(() => this.hide(), duration);
+            this._timeoutId = setTimeout(() => this.hide(), duration);
         }
     }
 
     hide() {
+        if (this._timeoutId) {
+            clearTimeout(this._timeoutId);
+            this._timeoutId = null;
+        }
         if (this.element) {
             this.element.className = 'status';
             this.element.style.display = 'none';
@@ -245,11 +256,18 @@ export class CopyButton {
     constructor(elementId, statusComponent) {
         this.element = document.getElementById(elementId);
         this.status = statusComponent;
+        this._boundCopy = () => this.copy();
 
         if (this.element) {
-            this.element.addEventListener('click', () => this.copy());
+            this.element.addEventListener('click', this._boundCopy);
             this.element.style.cursor = 'pointer';
             this.element.title = 'Click to copy';
+        }
+    }
+
+    destroy() {
+        if (this.element) {
+            this.element.removeEventListener('click', this._boundCopy);
         }
     }
 

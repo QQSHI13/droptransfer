@@ -18,6 +18,7 @@ export class DragDropHandler {
         };
 
         this.dragCounter = 0;
+        this._boundHandlers = {};
         this.init();
     }
 
@@ -27,35 +28,27 @@ export class DragDropHandler {
             return;
         }
 
-        // Click to select files
-        this.dropZone.addEventListener('click', (e) => {
-            if (e.button !== 0) return;
-            this.fileInput.click();
-        });
+        // Store bound handlers for cleanup
+        this._boundHandlers.click = (e) => { if (e.button !== 0) return; this.fileInput.click(); };
+        this._boundHandlers.contextmenu = (e) => { e.preventDefault(); if (this.folderInput) this.folderInput.click(); };
+        this._boundHandlers.fileChange = (e) => { this._handleFileInput(e.target.files); e.target.value = ''; };
+        this._boundHandlers.folderChange = (e) => { this._handleFolderInput(e.target.files); e.target.value = ''; };
+        this._boundHandlers.dragenter = (e) => { this.dragCounter++; this._setDragOver(true); };
+        this._boundHandlers.dragleave = (e) => { this.dragCounter--; if (this.dragCounter === 0) this._setDragOver(false); };
+        this._boundHandlers.drop = (e) => { this.dragCounter = 0; this._setDragOver(false); this._handleDrop(e); };
+        this._boundHandlers.keydown = (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); this.fileInput.click(); } };
 
-        // Right-click for folder selection
-        this.dropZone.addEventListener('contextmenu', (e) => {
-            e.preventDefault();
-            if (this.folderInput) {
-                this.folderInput.click();
-            }
-        });
+        // Use stored handlers
+        this.dropZone.addEventListener('click', this._boundHandlers.click);
+        this.dropZone.addEventListener('contextmenu', this._boundHandlers.contextmenu);
+        this.fileInput.addEventListener('change', this._boundHandlers.fileChange);
+        if (this.folderInput) this.folderInput.addEventListener('change', this._boundHandlers.folderChange);
+        this.dropZone.addEventListener('dragenter', this._boundHandlers.dragenter);
+        this.dropZone.addEventListener('dragleave', this._boundHandlers.dragleave);
+        this.dropZone.addEventListener('drop', this._boundHandlers.drop);
+        this.dropZone.addEventListener('keydown', this._boundHandlers.keydown);
 
-        // File input change
-        this.fileInput.addEventListener('change', (e) => {
-            this._handleFileInput(e.target.files);
-            e.target.value = '';
-        });
-
-        // Folder input change
-        if (this.folderInput) {
-            this.folderInput.addEventListener('change', (e) => {
-                this._handleFolderInput(e.target.files);
-                e.target.value = '';
-            });
-        }
-
-        // Drag events
+        // Drag events (prevent default)
         ['dragenter', 'dragover', 'dragleave', 'drop'].forEach(eventName => {
             this.dropZone.addEventListener(eventName, (e) => {
                 e.preventDefault();
@@ -63,35 +56,27 @@ export class DragDropHandler {
             }, false);
         });
 
-        this.dropZone.addEventListener('dragenter', (e) => {
-            this.dragCounter++;
-            this._setDragOver(true);
-        });
-
-        this.dropZone.addEventListener('dragleave', (e) => {
-            this.dragCounter--;
-            if (this.dragCounter === 0) {
-                this._setDragOver(false);
-            }
-        });
-
-        this.dropZone.addEventListener('drop', (e) => {
-            this.dragCounter = 0;
-            this._setDragOver(false);
-            this._handleDrop(e);
-        });
-
         // Keyboard accessibility
         this.dropZone.setAttribute('tabindex', '0');
         this.dropZone.setAttribute('role', 'button');
         this.dropZone.setAttribute('aria-label', 'Select files to send. Press Enter to browse, or right-click for folder selection.');
+    }
 
-        this.dropZone.addEventListener('keydown', (e) => {
-            if (e.key === 'Enter' || e.key === ' ') {
-                e.preventDefault();
-                this.fileInput.click();
-            }
-        });
+    destroy() {
+        if (this.dropZone) {
+            this.dropZone.removeEventListener('click', this._boundHandlers.click);
+            this.dropZone.removeEventListener('contextmenu', this._boundHandlers.contextmenu);
+            this.dropZone.removeEventListener('dragenter', this._boundHandlers.dragenter);
+            this.dropZone.removeEventListener('dragleave', this._boundHandlers.dragleave);
+            this.dropZone.removeEventListener('drop', this._boundHandlers.drop);
+            this.dropZone.removeEventListener('keydown', this._boundHandlers.keydown);
+        }
+        if (this.fileInput) {
+            this.fileInput.removeEventListener('change', this._boundHandlers.fileChange);
+        }
+        if (this.folderInput) {
+            this.folderInput.removeEventListener('change', this._boundHandlers.folderChange);
+        }
     }
 
     _setDragOver(isOver) {
