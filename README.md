@@ -8,7 +8,10 @@ Peer-to-peer file sharing in your browser. No servers, no accounts, no file size
 
 - **🔒 P2P Transfer** — Files go directly from sender to receiver, no middleman
 - **📁 Any File Size** — Limited only by your browser's memory
-- **🔐 Encrypted** — All transfers use WebRTC's built-in encryption
+- **🔐 Encrypted** — All transfers use WebRTC's built-in encryption + optional AES chunk encryption
+- **✅ Integrity Verified** — SHA-256 hash verification ensures files arrive intact
+- **💓 Connection Health** — Automatic heartbeat monitoring detects dead connections
+- **📊 Connection Metrics** — Real-time RTT and connection type (direct/relay) display
 - **📱 Cross-Platform** — Works on desktop and mobile browsers
 - **🎯 Simple UI** — Drag, drop, share. That's it.
 - **⚡ Fast** — Direct connection means maximum speed
@@ -56,13 +59,17 @@ So I built DropTransfer — no accounts, no limits, just works.
 - Requires modern browsers (Chrome, Firefox, Edge)
 - Both peers must keep the tab open during transfer
 - Mobile browsers may have stricter background tab policies
+- Very large files (>2GB) may hit browser memory limits
 
 ## 🔮 Future Plans
 
+- [x] Connection health monitoring (heartbeat)
+- [x] File integrity verification (SHA-256)
+- [x] Connection quality metrics (RTT, connection type)
 - [ ] Folder transfer support
 - [ ] Resume interrupted transfers
-- [ ] End-to-end encryption with custom keys
 - [ ] Self-hosted signaling server option
+- [ ] Multi-file batch transfer with individual progress
 
 ## ⚠️ Security Note
 

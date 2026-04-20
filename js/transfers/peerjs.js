@@ -9,6 +9,8 @@ const MAX_IN_FLIGHT = 32; // Max chunks without acknowledgment
 const ACK_TIMEOUT = 30000; // 30 seconds
 const MAX_RETRIES = 3;
 const CONNECTION_TIMEOUT = 20000;
+const HEARTBEAT_INTERVAL = 10000; // 10 seconds
+const HEARTBEAT_TIMEOUT = 30000; // 30 seconds (3 missed heartbeats)
 
 // ICE configuration for NAT traversal
 const ICE_CONFIG = {
@@ -57,6 +59,16 @@ export class PeerJSTransfer {
         // Timing
         this.transferStartTime = null;
         this.lastProgressUpdate = 0;
+
+        // Connection health monitoring
+        this.heartbeatTimer = null;
+        this.lastHeartbeatReceived = 0;
+        this.connectionMetrics = {
+            rtt: [],
+            connectionType: 'unknown',
+            packetsLost: 0,
+            startTime: null
+        };
 
         // Cleanup tracking
         this.objectURLs = [];
@@ -200,11 +212,24 @@ export class PeerJSTransfer {
         let bytesSent = 0;
 
         try {
-            // Send metadata
+            // Compute file hashes for integrity verification
+            const fileHashes = await Promise.all(
+                files.map(async (f) => {
+                    const hash = await this._computeFileHash(f.file);
+                    return { index: files.indexOf(f), hash };
+                })
+            );
+
+            // Send metadata with hashes
             const metadata = {
                 type: 'metadata',
                 fileCount: files.length,
-                files: files.map(f => ({ name: f.file.name, path: f.path, size: f.file.size })),
+                files: files.map((f, i) => ({ 
+                    name: f.file.name, 
+                    path: f.path, 
+                    size: f.file.size,
+                    hash: fileHashes.find(h => h.index === i)?.hash 
+                })),
                 totalSize: totalBytes
             };
             this.conn.send(metadata);
@@ -259,6 +284,9 @@ export class PeerJSTransfer {
      * Clean up all resources
      */
     cleanup() {
+        // Stop heartbeat
+        this._stopHeartbeat();
+
         // Clear timeouts
         if (this.connectionTimeout) {
             clearTimeout(this.connectionTimeout);
@@ -293,6 +321,84 @@ export class PeerJSTransfer {
         state.set({ connectionState: 'disconnected', transferState: 'idle' });
     }
 
+    // Heartbeat & Connection Health
+
+    _startHeartbeat() {
+        this.lastHeartbeatReceived = Date.now();
+        this.connectionMetrics.startTime = Date.now();
+
+        // Send heartbeat every 10 seconds
+        this.heartbeatTimer = setInterval(() => {
+            if (this.conn?.open) {
+                this.conn.send({ type: 'ping', timestamp: Date.now() });
+
+                // Check if we've missed heartbeats
+                const elapsed = Date.now() - this.lastHeartbeatReceived;
+                if (elapsed > HEARTBEAT_TIMEOUT) {
+                    console.warn('[PeerJS] Connection appears dead (no heartbeat for', elapsed, 'ms)');
+                    state.set({ errorMessage: 'Connection lost. Transfer may have failed.' });
+                    this.cleanup();
+                }
+            }
+        }, HEARTBEAT_INTERVAL);
+    }
+
+    _stopHeartbeat() {
+        if (this.heartbeatTimer) {
+            clearInterval(this.heartbeatTimer);
+            this.heartbeatTimer = null;
+        }
+    }
+
+    _handleHeartbeat(data) {
+        if (data.type === 'ping') {
+            // Respond with pong
+            if (this.conn?.open) {
+                this.conn.send({ type: 'pong', timestamp: data.timestamp });
+            }
+        } else if (data.type === 'pong') {
+            // Calculate RTT
+            const rtt = Date.now() - data.timestamp;
+            this.connectionMetrics.rtt.push(rtt);
+            this.lastHeartbeatReceived = Date.now();
+
+            // Keep only last 10 RTT samples
+            if (this.connectionMetrics.rtt.length > 10) {
+                this.connectionMetrics.rtt.shift();
+            }
+
+            // Detect connection type from first successful pong
+            if (this.connectionMetrics.connectionType === 'unknown' && this.conn?.peerConnection) {
+                const stats = this.conn.peerConnection.getStats();
+                stats.then(report => {
+                    report.forEach(stat => {
+                        if (stat.type === 'candidate-pair' && stat.state === 'succeeded') {
+                            const local = report.get(stat.localCandidateId);
+                            const remote = report.get(stat.remoteCandidateId);
+                            if (local && remote) {
+                                const isRelay = local.candidateType === 'relay' || remote.candidateType === 'relay';
+                                this.connectionMetrics.connectionType = isRelay ? 'relay' : 'direct';
+                                console.log('[PeerJS] Connection type:', this.connectionMetrics.connectionType);
+                            }
+                        }
+                    });
+                });
+            }
+        }
+    }
+
+    getConnectionMetrics() {
+        const avgRtt = this.connectionMetrics.rtt.length > 0
+            ? Math.round(this.connectionMetrics.rtt.reduce((a, b) => a + b, 0) / this.connectionMetrics.rtt.length)
+            : null;
+
+        return {
+            rtt: avgRtt,
+            connectionType: this.connectionMetrics.connectionType,
+            uptime: this.connectionMetrics.startTime ? Date.now() - this.connectionMetrics.startTime : 0
+        };
+    }
+
     // Private methods
 
     _handleIncomingConnection(connection, onError) {
@@ -325,10 +431,12 @@ export class PeerJSTransfer {
 
         this.conn.on('close', () => {
             clearTimeout(this.connectionTimeout);
+            this._stopHeartbeat();
             console.log('[PeerJS] Connection closed');
             state.set({ connectionState: 'disconnected' });
         });
 
+        this._startHeartbeat();
         state.set({ connectionState: 'connected' });
     }
 
@@ -346,6 +454,8 @@ export class PeerJSTransfer {
                 console.error('[PeerJS] Key derivation failed:', err);
                 this.conn.send('ready'); // Continue unencrypted if key fails
             }
+
+            this._startHeartbeat();
         });
 
         this.conn.on('data', (data) => {
@@ -483,6 +593,12 @@ export class PeerJSTransfer {
     }
 
     _handleData(data) {
+        // Handle heartbeat messages
+        if (data && (data.type === 'ping' || data.type === 'pong')) {
+            this._handleHeartbeat(data);
+            return;
+        }
+
         if (data === 'ready') {
             console.log('[PeerJS] Receiver ready');
             state.set({ transferState: 'sending' });
@@ -492,6 +608,9 @@ export class PeerJSTransfer {
         } else if (data?.type === 'ack') {
             const ackKey = `${data.fileIndex}-${data.chunkIndex}`;
             this.pendingAcks.delete(ackKey);
+        } else if (data?.type === 'hashVerify') {
+            // Receiver is verifying file hash
+            console.log('[PeerJS] Hash verification result:', data.verified ? 'PASS' : 'FAIL');
         }
     }
 
@@ -532,7 +651,7 @@ export class PeerJSTransfer {
 
             case 'fileStart':
                 if (this.receivedChunks.length > 0) {
-                    this._saveCurrentFile();
+                    await this._saveCurrentFile();
                 }
                 this.currentFileIndex = data.fileIndex;
                 this.receivedChunks = [];
@@ -546,12 +665,12 @@ export class PeerJSTransfer {
                 break;
 
             case 'fileDone':
-                this._saveCurrentFile();
+                await this._saveCurrentFile();
                 break;
 
             case 'done':
                 if (this.receivedChunks.length > 0) {
-                    this._saveCurrentFile();
+                    await this._saveCurrentFile();
                 }
                 this.conn?.send('received');
                 state.set({ transferState: 'completed' });
@@ -615,20 +734,59 @@ export class PeerJSTransfer {
         onProgress?.(this.receivedSize, this.fileInfo.totalSize, speed);
     }
 
-    _saveCurrentFile() {
+    async _saveCurrentFile() {
         if (this.receivedChunks.length === 0) return;
 
         const blob = new Blob(this.receivedChunks);
         const fileInfo = this.fileInfo.files[this.currentFileIndex];
 
+        // Verify file integrity if hash was provided
+        let hashVerified = true;
+        if (fileInfo.hash) {
+            const computedHash = await this._computeHash(blob);
+            hashVerified = computedHash === fileInfo.hash;
+            if (!hashVerified) {
+                console.error('[PeerJS] Hash mismatch for file:', fileInfo.name);
+                state.set({ errorMessage: `File integrity check failed for ${fileInfo.name}` });
+            } else {
+                console.log('[PeerJS] Hash verified for file:', fileInfo.name);
+            }
+        }
+
         this.receivedFiles.push({
             blob,
             name: fileInfo.name,
             path: fileInfo.path,
-            size: blob.size
+            size: blob.size,
+            hashVerified
         });
 
+        // Report hash verification result to sender
+        if (this.conn?.open && fileInfo.hash) {
+            this.conn.send({ type: 'hashVerify', fileIndex: this.currentFileIndex, verified: hashVerified });
+        }
+
         this.receivedChunks = [];
+    }
+
+    /**
+     * Compute SHA-256 hash of a Blob/File
+     */
+    async _computeHash(blob) {
+        const buffer = await blob.arrayBuffer();
+        const hashBuffer = await crypto.subtle.digest('SHA-256', buffer);
+        const hashArray = Array.from(new Uint8Array(hashBuffer));
+        return hashArray.map(b => b.toString(16).padStart(2, '0')).join('');
+    }
+
+    /**
+     * Compute SHA-256 hash of a File object
+     */
+    async _computeFileHash(file) {
+        const buffer = await file.arrayBuffer();
+        const hashBuffer = await crypto.subtle.digest('SHA-256', buffer);
+        const hashArray = Array.from(new Uint8Array(hashBuffer));
+        return hashArray.map(b => b.toString(16).padStart(2, '0')).join('');
     }
 }
 
