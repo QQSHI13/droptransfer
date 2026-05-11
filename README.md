@@ -88,3 +88,15 @@ Powered by [OpenClaw](https://openclaw.ai)
 ---
 
 **⭐ Star this repo if you find it useful!**
+
+---
+
+## ⭐ Star History
+
+<a href="https://star-history.com/#QQSHI13/droptransfer&Date">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/svg?repos=QQSHI13/droptransfer&type=Date&theme=dark" />
+    <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/svg?repos=QQSHI13/droptransfer&type=Date" />
+    <img alt="Star History Chart" src="https://api.star-history.com/svg?repos=QQSHI13/droptransfer&type=Date" />
+  </picture>
+</a>
