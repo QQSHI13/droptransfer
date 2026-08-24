@@ -5,6 +5,10 @@ on:
     branches: [master, main]
   pull_request:
     branches: [master, main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
 
 jobs:
   validate-pwa:
@@ -13,11 +17,70 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v7
 
-      - name: Check manifest.json exists
-        run: test -f manifest.json
+      - name: Check required PWA files exist
+        run: |
+          for f in index.html manifest.json sw.js; do
+            test -f "$f" || { echo "::error::$f is missing"; exit 1; }
+          done
+          echo "index.html, manifest.json and sw.js are present"
 
-      - name: Check service worker exists
-        run: test -f sw.js
+      - name: Validate manifest.json
+        run: |
+          python3 << 'PY'
+          import json, sys
+          with open('manifest.json') as f:
+              m = json.load(f)
+          required = ['name', 'short_name', 'start_url', 'display',
+                      'background_color', 'theme_color', 'icons']
+          missing = [k for k in required if k not in m]
+          if missing:
+              print(f"::error::manifest.json missing fields: {', '.join(missing)}")
+              sys.exit(1)
+          icons = m.get('icons')
+          if not isinstance(icons, list) or not icons:
+              print("::error::manifest.json has no icons")
+              sys.exit(1)
+          if not any(i.get('sizes') == '192x192' for i in icons):
+              print("::error::manifest.json needs a 192x192 icon")
+              sys.exit(1)
+          print("manifest.json is valid and has the required fields")
+          PY
+
+      - name: Check referenced icon files exist
+        run: |
+          python3 << 'PY'
+          import json, os, sys, urllib.parse
+          with open('manifest.json') as f:
+              m = json.load(f)
+          missing = []
+          for icon in m.get('icons', []):
+              src = icon.get('src', '')
+              # Inline data: URIs and remote icons need no local file.
+              if not src or src.startswith(('data:', 'http://', 'https://')):
+                  continue
+              path = urllib.parse.unquote(src.split('?')[0].lstrip('./'))
+              if not os.path.isfile(path):
+                  missing.append(path)
+          if missing:
+              print(f"::error::manifest icons not found on disk: {', '.join(missing)}")
+              sys.exit(1)
+          print("All file-backed manifest icons exist")
+          PY
+
+      - name: Check manifest link and service worker registration
+        run: |
+          grep -q 'rel="manifest"' index.html \
+            || { echo "::error::index.html does not link manifest.json"; exit 1; }
+          # Registration may live in index.html or in a script it loads.
+          grep -rqs 'serviceWorker.register' --include='*.html' --include='*.js' . \
+            || { echo "::error::no serviceWorker.register call found"; exit 1; }
+          echo "manifest is linked and a service worker is registered"
+
+      - name: Verify service worker bumps its cache name
+        run: |
+          grep -qE "CACHE[A-Z_]*\s*=\s*['\"][^'\"]*v[0-9]+['\"]" sw.js \
+            || { echo "::error::sw.js cache name must carry a version suffix (e.g. app-v3)"; exit 1; }
+          echo "sw.js uses a versioned cache name"
 
       - name: Setup Node.js
         uses: actions/setup-node@v7
@@ -27,8 +90,9 @@ jobs:
       - name: Install Lighthouse CI
         run: npm install -g @lhci/cli@0.14.x
 
-      - name: Run Lighthouse CI (PWA checks)
-        run: |
-          lhci autorun --config=lighthouserc.json || true
+      # Lighthouse 12 removed the "pwa" category, so PWA conformance is asserted
+      # by the explicit steps above. Lighthouse gates the remaining categories.
+      - name: Run Lighthouse CI
+        run: lhci autorun --config=lighthouserc.json
         env:
           LHCI_GITHUB_APP_TOKEN: ${{ secrets.GITHUB_TOKEN }}
