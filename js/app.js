@@ -1,5 +1,5 @@
 import state from './state.js';
-import { isValidCode, formatSize } from './utils.js';
+import { parseTransferCode, formatSize } from './utils.js';
 import { PeerJSTransfer } from './transfers/peerjs.js';
 import { WebTorrentTransfer } from './transfers/webtorrent.js';
 import { DragDropHandler } from './ui/dragdrop.js';
@@ -47,6 +47,7 @@ class DropTransferApp {
 
         // Copy buttons
         new CopyButton('peerId', this.sendStatus);
+        new CopyButton('shareCode', this.sendStatus);
         new CopyButton('magnetLink', this.sendStatus);
 
         // Subscribe to state changes
@@ -55,7 +56,23 @@ class DropTransferApp {
         // Bind UI events
         this.bindEvents();
 
+        // A receiver arriving via a share link should not have to copy anything.
+        this.prefillFromLink();
+
         console.log('[App] DropTransfer initialized');
+    }
+
+    prefillFromLink() {
+        if (!location.hash) return;
+
+        const parsed = parseTransferCode(location.hash);
+        if (!parsed) return;
+
+        const input = document.getElementById('codeInput');
+        if (!input) return;
+
+        input.value = `${parsed.code}:${parsed.secret}`;
+        this.recvStatus.info('Transfer link detected — press Connect to receive');
     }
 
     setupStateSubscriptions() {
@@ -129,11 +146,16 @@ class DropTransferApp {
         this.progress.show();
 
         await this.peerTransfer.initSender(
-            (peerId) => {
-                document.getElementById('peerId').textContent = peerId;
+            (peerId, secret) => {
+                // The secret lives in the fragment, which browsers never send to
+                // a server — so the signaling server sees the peer ID but never
+                // the key material derived from this link.
+                const link = `${location.origin}${location.pathname}#${peerId}:${secret}`;
+                document.getElementById('peerId').textContent = link;
+                document.getElementById('shareCode').textContent = `${peerId}:${secret}`;
                 document.getElementById('codeBox').classList.add('show');
                 document.getElementById('connectionWaiting').style.display = 'block';
-                this.sendStatus.success('Ready! Share the code with the receiver');
+                this.sendStatus.success('Ready! Share this link with the receiver');
             },
             (err) => {
                 this.sendStatus.error('Connection error: ' + err.message);
@@ -170,17 +192,24 @@ class DropTransferApp {
     }
 
     async connect() {
-        const code = document.getElementById('codeInput').value.trim();
+        const raw = document.getElementById('codeInput').value.trim();
 
-        if (!code) {
-            this.recvStatus.error('Please enter a transfer code');
+        if (!raw) {
+            this.recvStatus.error('Please enter a transfer link or code');
             return;
         }
 
-        if (!isValidCode(code)) {
-            this.recvStatus.error('Invalid code format');
+        const parsed = parseTransferCode(raw);
+
+        if (!parsed) {
+            this.recvStatus.error(
+                'Invalid transfer link. Paste the full link from the sender, ' +
+                'or the code in the form abc123:KEY'
+            );
             return;
         }
+
+        const { code, secret } = parsed;
 
         document.getElementById('connectBtn').disabled = true;
         this.recvStatus.info('Connecting...');
@@ -188,6 +217,7 @@ class DropTransferApp {
 
         await this.peerTransfer.initReceiver(
             code,
+            secret,
             (bytesReceived, totalBytes, speed) => {},
             (files) => {
                 this.recvStatus.success('Transfer complete!');
@@ -198,6 +228,7 @@ class DropTransferApp {
             (err) => {
                 this.recvStatus.error(err.message);
                 this.modeIndicator.showError(true);
+                document.getElementById('connectBtn').disabled = false;
                 document.getElementById('retryBtn').style.display = 'block';
             }
         );
@@ -285,6 +316,12 @@ class DropTransferApp {
         document.getElementById('codeBox').classList.remove('show');
         document.getElementById('magnetBox').classList.remove('show');
         document.getElementById('codeInput').value = '';
+        // Don't leave a spent secret on screen or in the URL.
+        document.getElementById('peerId').textContent = '';
+        document.getElementById('shareCode').textContent = '';
+        if (location.hash) {
+            history.replaceState(null, '', location.pathname + location.search);
+        }
         document.getElementById('connectBtn').disabled = false;
         document.getElementById('connectBtn').style.display = 'block';
         document.getElementById('retryBtn').style.display = 'none';

@@ -78,6 +78,41 @@ export function isValidCode(code) {
 }
 
 /**
+ * Parse what the receiver pasted into a peer ID and a shared secret.
+ *
+ * Accepts either the full share link (`https://host/#code:secret`) or the bare
+ * `code:secret` pair, so a user who copies only the code line still works.
+ *
+ * @param {string} input - Raw text from the code field
+ * @returns {{code: string, secret: string}|null} null if unparseable
+ */
+export function parseTransferCode(input) {
+    if (typeof input !== 'string') return null;
+
+    let value = input.trim();
+    if (!value) return null;
+
+    // Full link: everything meaningful is in the fragment.
+    const hashIndex = value.indexOf('#');
+    if (hashIndex !== -1) {
+        value = value.slice(hashIndex + 1);
+    }
+
+    const sep = value.lastIndexOf(':');
+    if (sep === -1) return null;
+
+    const code = value.slice(0, sep).trim();
+    const secret = value.slice(sep + 1).trim();
+
+    if (!isValidCode(code)) return null;
+    // 16 bytes of base64url. Kept in sync with crypto.js isValidSecret, which
+    // performs the authoritative check before any key is derived.
+    if (!/^[A-Za-z0-9_-]{22}$/.test(secret)) return null;
+
+    return { code, secret };
+}
+
+/**
  * Format time duration
  * @param {number} seconds - Duration in seconds
  * @returns {string} Formatted duration (e.g., "2m 30s")

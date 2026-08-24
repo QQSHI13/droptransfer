@@ -3,7 +3,7 @@
  * Network-first for HTML, cache-first for assets
  */
 
-const CACHE_NAME = 'droptransfer-v2';
+const CACHE_NAME = 'droptransfer-v3';
 const urlsToCache = [
   './',
   './index.html'

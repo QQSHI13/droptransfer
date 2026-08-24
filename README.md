@@ -2,13 +2,11 @@
 
 Peer-to-peer file sharing in your browser. No servers, no accounts, no file size limits.
 
-![DropTransfer Demo](demo.gif)
-
 ## ✨ Features
 
 - **🔒 P2P Transfer** — Files go directly from sender to receiver, no middleman
 - **📁 Any File Size** — Limited only by your browser's memory
-- **🔐 Encrypted** — All transfers use WebRTC's built-in encryption + optional AES chunk encryption
+- **🔐 Encrypted** — WebRTC's built-in DTLS plus mandatory AES-GCM chunk encryption, keyed by a secret that never reaches the signaling server
 - **✅ Integrity Verified** — SHA-256 hash verification ensures files arrive intact
 - **💓 Connection Health** — Automatic heartbeat monitoring detects dead connections
 - **📊 Connection Metrics** — Real-time RTT and connection type (direct/relay) display
@@ -32,7 +30,7 @@ Peer-to-peer file sharing in your browser. No servers, no accounts, no file size
 - **Frontend:** HTML5, CSS3, JavaScript
 - **P2P:** WebRTC DataChannels
 - **Signaling:** Custom lightweight server (for connection setup only)
-- **Encryption:** DTLS (built into WebRTC)
+- **Encryption:** DTLS (built into WebRTC) + AES-GCM per chunk, keyed via HKDF-SHA256
 
 ## 📖 How It Works
 
@@ -73,7 +71,16 @@ So I built DropTransfer — no accounts, no limits, just works.
 
 ## ⚠️ Security Note
 
-While WebRTC provides encryption in transit, the initial signaling goes through our server. For maximum privacy, you can self-host the signaling server (see `docs/self-host.md`).
+Signaling goes through our server, so it learns that two peers connected and
+when. It does **not** learn the encryption key: the share link carries a random
+secret in its URL fragment, which browsers never transmit, and the AES-GCM key is
+derived from that secret via HKDF. Chunk encryption is mandatory — if the key
+cannot be established the transfer aborts rather than falling back to plaintext.
+
+Treat the share link as the credential it is. Anyone who obtains it can receive
+the files, so send it over a channel you trust, and bear in mind the secret is
+visible in the sender's address bar and browser history. For maximum privacy you
+can also self-host the signaling server (see `docs/self-host.md`).
 
 ## 📄 License
 

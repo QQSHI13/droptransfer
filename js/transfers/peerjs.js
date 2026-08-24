@@ -1,5 +1,5 @@
 import state from '../state.js';
-import { deriveKey, encryptChunk, decryptChunk, generateIV } from '../crypto.js';
+import { deriveKey, encryptChunk, decryptChunk, generateIV, generateSecret, isValidSecret } from '../crypto.js';
 import { formatSize } from '../utils.js';
 
 // Configuration
@@ -41,6 +41,9 @@ export class PeerJSTransfer {
         this.peer = null;
         this.conn = null;
         this.encryptionKey = null;
+        // Per-transfer shared secret. The sender generates it; the receiver
+        // supplies it from the share link. It is never sent over the wire.
+        this.secret = null;
         this.isSender = false;
 
         // Transfer state
@@ -78,7 +81,7 @@ export class PeerJSTransfer {
 
     /**
      * Initialize as sender
-     * @param {Function} onReady - Called when peer ID is ready
+     * @param {Function} onReady - Called with (peerId, secret) when ready
      * @param {Function} onError - Called on errors
      */
     async initSender(onReady, onError) {
@@ -88,6 +91,10 @@ export class PeerJSTransfer {
         try {
             state.set({ connectionState: 'connecting' });
 
+            // Generated before the peer opens: if the browser cannot do crypto
+            // we must fail here rather than fall back to an unencrypted transfer.
+            this.secret = generateSecret();
+
             this.peer = new Peer({
                 config: ICE_CONFIG,
                 debug: 1
@@ -96,7 +103,7 @@ export class PeerJSTransfer {
             this.peer.on('open', (id) => {
                 console.log('[PeerJS] Sender ready, ID:', id);
                 state.set({ peerId: id, connectionState: 'waiting' });
-                onReady?.(id);
+                onReady?.(id, this.secret);
             });
 
             this.peer.on('connection', (connection) => {
@@ -125,11 +132,12 @@ export class PeerJSTransfer {
     /**
      * Initialize as receiver
      * @param {string} code - Sender's peer ID
+     * @param {string} secret - Shared secret from the share link
      * @param {Function} onProgress - Progress callback
      * @param {Function} onComplete - Completion callback
      * @param {Function} onError - Error callback
      */
-    async initReceiver(code, onProgress, onComplete, onError) {
+    async initReceiver(code, secret, onProgress, onComplete, onError) {
         this.isSender = false;
         this.abortController = new AbortController();
 
@@ -137,6 +145,18 @@ export class PeerJSTransfer {
             onError?.(new Error('Please enter a transfer code'));
             return;
         }
+
+        // Without the secret there is no key, and this build does not transfer
+        // unencrypted, so stop before opening a connection.
+        if (!isValidSecret(secret)) {
+            onError?.(new Error(
+                'This transfer code is missing its encryption key. Use the full ' +
+                'share link from the sender.'
+            ));
+            return;
+        }
+
+        this.secret = secret;
 
         try {
             state.set({ connectionState: 'connecting' });
@@ -317,6 +337,7 @@ export class PeerJSTransfer {
         this.receivedFiles = [];
         this.metadataReceived = false;
         this.encryptionKey = null;
+        this.secret = null;
 
         state.set({ connectionState: 'disconnected', transferState: 'idle' });
     }
@@ -408,8 +429,10 @@ export class PeerJSTransfer {
         this.conn.serialization = 'binary';
         this.conn.reliable = true;
 
-        // Derive encryption key before accepting data
-        deriveKey(this.peer.id, connection.peer)
+        // Derive encryption key before accepting data. If this fails there is no
+        // key, and sending plaintext instead would silently downgrade a transfer
+        // the user was told is encrypted — so drop the connection instead.
+        deriveKey(this.secret, this.peer.id, connection.peer)
             .then(key => {
                 this.encryptionKey = key;
                 console.log('[PeerJS] Encryption established');
@@ -418,8 +441,12 @@ export class PeerJSTransfer {
                 this.conn.on('data', (data) => this._handleData(data));
             })
             .catch(err => {
-                console.error('[PeerJS] Key derivation failed:', err);
-                this.conn.on('data', (data) => this._handleData(data));
+                console.error('[PeerJS] Key derivation failed, refusing transfer:', err);
+                const message = 'Could not establish encryption: ' + err.message;
+                state.set({ connectionState: 'error', errorMessage: message });
+                try { this.conn?.send({ type: 'error', message }); } catch { /* connection may already be gone */ }
+                this.conn?.close();
+                onError?.(new Error(message));
             });
 
         this.conn.on('error', (err) => {
@@ -448,11 +475,17 @@ export class PeerJSTransfer {
             state.set({ connectionState: 'connected' });
 
             try {
-                this.encryptionKey = await deriveKey(code, this.peer.id);
+                this.encryptionKey = await deriveKey(this.secret, code, this.peer.id);
                 this.conn.send('ready');
             } catch (err) {
-                console.error('[PeerJS] Key derivation failed:', err);
-                this.conn.send('ready'); // Continue unencrypted if key fails
+                // No key means no encrypted transfer. Signalling 'ready' here
+                // would invite the sender to start, so abort instead.
+                console.error('[PeerJS] Key derivation failed, refusing transfer:', err);
+                const message = 'Could not establish encryption: ' + err.message;
+                state.set({ connectionState: 'error', errorMessage: message });
+                this.conn?.close();
+                onError?.(new Error(message));
+                return;
             }
 
             this._startHeartbeat();
@@ -508,12 +541,14 @@ export class PeerJSTransfer {
             const start = nextChunkIdx * CHUNK_SIZE;
             const end = Math.min(start + CHUNK_SIZE, buffer.byteLength);
             let chunk = buffer.slice(start, end);
-            let iv = null;
 
-            if (this.encryptionKey) {
-                iv = generateIV();
-                chunk = await encryptChunk(this.encryptionKey, chunk, iv);
+            // Encryption is not optional: reaching here without a key is a bug,
+            // and sending plaintext would be worse than failing.
+            if (!this.encryptionKey) {
+                throw new Error('Refusing to send: encryption key not established');
             }
+            const iv = generateIV();
+            chunk = await encryptChunk(this.encryptionKey, chunk, iv);
 
             const chunkKey = `${fileIndex}-${nextChunkIdx}`;
             this.pendingAcks.set(chunkKey, { index: nextChunkIdx, fileIndex, retries: 0 });
@@ -523,7 +558,7 @@ export class PeerJSTransfer {
                 data: new Uint8Array(chunk),
                 index: nextChunkIdx,
                 total: totalChunks,
-                iv: iv ? Array.from(iv) : null,
+                iv: Array.from(iv),
                 fileIndex
             });
 
@@ -565,6 +600,11 @@ export class PeerJSTransfer {
     }
 
     async _resendUnackedChunks(fileIndex, file) {
+        // Same rule as the initial send: no key, no transfer.
+        if (!this.encryptionKey) {
+            throw new Error('Refusing to resend: encryption key not established');
+        }
+
         for (const [chunkKey, chunkInfo] of this.pendingAcks) {
             if (!this.conn?.open) return;
 
@@ -573,20 +613,17 @@ export class PeerJSTransfer {
             const end = Math.min(start + CHUNK_SIZE, file.size);
             const chunk = file.slice(start, end);
 
-            let dataToSend = await chunk.arrayBuffer();
-            let iv = null;
-
-            if (this.encryptionKey) {
-                iv = generateIV();
-                dataToSend = await encryptChunk(this.encryptionKey, dataToSend, iv);
-            }
+            // A fresh IV per resend: reusing one with the same key would leak
+            // plaintext relationships, which is exactly what AES-GCM forbids.
+            const iv = generateIV();
+            const dataToSend = await encryptChunk(this.encryptionKey, await chunk.arrayBuffer(), iv);
 
             this.conn.send({
                 type: 'chunk',
                 data: new Uint8Array(dataToSend),
                 index: chunkIdx,
                 total: Math.ceil(file.size / CHUNK_SIZE),
-                iv: iv ? Array.from(iv) : null,
+                iv: Array.from(iv),
                 fileIndex
             });
         }
@@ -688,16 +725,30 @@ export class PeerJSTransfer {
 
         let chunkData = data.data instanceof ArrayBuffer ? data.data : data.data.buffer;
 
-        // Decrypt if needed
-        if (this.encryptionKey && data.iv) {
-            try {
-                const iv = new Uint8Array(data.iv);
-                chunkData = await decryptChunk(this.encryptionKey, chunkData, iv);
-            } catch (err) {
-                console.error('[PeerJS] Decryption failed:', err);
-                this.conn?.send({ type: 'error', message: 'Decryption failed' });
-                return;
-            }
+        // Decryption is mandatory. Accepting a chunk that arrives without an IV
+        // would let a peer force plaintext just by omitting it, so reject those
+        // outright rather than treating them as unencrypted data.
+        if (!this.encryptionKey) {
+            console.error('[PeerJS] Chunk received before encryption was established');
+            this.conn?.send({ type: 'error', message: 'Encryption not established' });
+            return;
+        }
+
+        if (!data.iv) {
+            console.error('[PeerJS] Rejecting chunk sent without an IV');
+            this.conn?.send({ type: 'error', message: 'Unencrypted chunk rejected' });
+            return;
+        }
+
+        try {
+            const iv = new Uint8Array(data.iv);
+            chunkData = await decryptChunk(this.encryptionKey, chunkData, iv);
+        } catch (err) {
+            // AES-GCM authenticates as well as encrypts, so a failure here means
+            // the chunk was corrupted or tampered with.
+            console.error('[PeerJS] Decryption failed:', err);
+            this.conn?.send({ type: 'error', message: 'Decryption failed' });
+            return;
         }
 
         // Handle out-of-order chunks
