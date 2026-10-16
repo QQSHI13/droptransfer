@@ -106,3 +106,26 @@ Built with ❤️ by [QQ](https://github.com/QQSHI13) & Nova ☄️
  <img alt="Star History Chart" src="https://api.star-history.com/chart?repos=QQSHI13/droptransfer&type=date&legend=top-left" />
  </picture>
 </a>
+
+---
+
+## Vendored browser dependencies
+
+Third-party browser libraries are served from `vendor/`, not a public CDN —
+`cdn.jsdelivr.net` and friends are blocked or unreliable on some networks, which
+silently broke the app.
+
+```bash
+npm ci          # install the exact pinned versions
+npm run vendor  # copy the browser builds into vendor/ and write VERSIONS.json
+```
+
+Versions are pinned exactly in `package.json` and tracked by Dependabot. The
+`Vendor check` workflow re-runs `npm run vendor` on every push and PR and fails
+if `vendor/` differs from the pins, so **after merging a dependency bump run
+`npm ci && npm run vendor` and commit the regenerated files**:
+
+```bash
+gh pr checkout <number> && npm ci && npm run vendor
+git commit -am "chore: re-vendor after dependency bump" && git push
+```
