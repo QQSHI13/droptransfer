@@ -88,9 +88,8 @@ This project is licensed under the [GPL-3.0 License](LICENSE).
 
 ## 🙏 Credits
 
-Built with ❤️ by [QQ](https://github.com/QQSHI13) & [Nova ☄️](https://openclaw.ai)
+Built with ❤️ by [QQ](https://github.com/QQSHI13) & Nova ☄️
 
-Powered by [OpenClaw](https://openclaw.ai)
 
 ---
 

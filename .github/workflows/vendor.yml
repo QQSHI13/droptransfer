@@ -1,0 +1,41 @@
+name: Vendor check
+
+# vendor/ must always match the exact versions pinned in package.json.
+# Dependabot opens the bump PR; this job fails until `npm run vendor` is run and
+# the regenerated files are committed, so the site can never serve a library
+# that disagrees with the lockfile.
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  parity:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '22'
+          cache: npm
+
+      - name: Install pinned dependencies
+        run: npm ci
+
+      - name: Re-vendor
+        run: npm run vendor
+
+      - name: Fail if vendor/ is stale
+        run: |
+          if ! git diff --quiet -- vendor/; then
+            echo "::error title=Stale vendor/::vendor/ does not match package.json. Run 'npm run vendor' and commit the result."
+            git --no-pager diff --stat -- vendor/
+            git --no-pager diff -- vendor/VERSIONS.json
+            exit 1
+          fi
+          echo "vendor/ matches package.json ✅"

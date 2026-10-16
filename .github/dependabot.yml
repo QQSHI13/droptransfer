@@ -1,0 +1,15 @@
+version: 2
+updates:
+  # The browser libraries in vendor/ are only as current as their exact pins in
+  # package.json — this is what keeps them patched. A bump lands as a PR and the
+  # Vendor check workflow verifies vendor/ was regenerated to match.
+  - package-ecosystem: "npm"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 5
+
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"

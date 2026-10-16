@@ -1,0 +1,14 @@
+{
+  "name": "droptransfer",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Vendored browser dependencies for DropTransfer (nothing here is published).",
+  "scripts": {
+    "vendor": "node scripts/vendor.mjs"
+  },
+  "devDependencies": {
+    "jszip": "3.10.1",
+    "peerjs": "1.5.2",
+    "webtorrent": "2.8.5"
+  }
+}
