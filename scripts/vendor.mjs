@@ -13,7 +13,9 @@ import { join } from 'node:path';
 
 const MAP = [
   ['peerjs',     'dist/peerjs.min.js',     'vendor/peerjs.min.js'],
-  ['webtorrent', 'dist/webtorrent.min.js', 'vendor/webtorrent.min.js'],
+  // WebTorrent v2 only ships an ESM bundle (no UMD/global build), so it is
+  // imported as a module rather than loaded with a classic <script> tag.
+  ['webtorrent', 'dist/webtorrent.min.js', 'vendor/webtorrent.esm.js'],
   ['jszip',      'dist/jszip.min.js',      'vendor/jszip.min.js'],
 ];
 

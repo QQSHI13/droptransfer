@@ -1,3 +1,6 @@
+// WebTorrent v2 ships ESM only — no UMD/global build exists, so this is a
+// real module import of the file vendored by `npm run vendor`.
+import WebTorrent from '../../vendor/webtorrent.esm.js';
 import state from '../state.js';
 import { formatSize } from '../utils.js';
 
