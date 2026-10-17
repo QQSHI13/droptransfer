@@ -7,7 +7,7 @@
     "vendor": "node scripts/vendor.mjs"
   },
   "devDependencies": {
-    "jszip": "3.10.1",
+    "jszip": "3.10.2",
     "peerjs": "1.5.2",
     "webtorrent": "2.8.5"
   },
