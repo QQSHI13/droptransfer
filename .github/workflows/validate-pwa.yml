@@ -90,6 +90,10 @@ jobs:
 
       # Lighthouse 12 removed the "pwa" category, so PWA conformance is asserted
       # by the explicit steps above. Lighthouse gates the remaining categories.
+      # `lhci autorun` starts the static server itself (see lighthouserc.json).
+      # The old config pointed Lighthouse at the whole repo directory, where
+      # serve-handler answers with the 404.html page *as a 404*, so the audit's
+      # document request failed and the job failed with ERRORED_DOCUMENT_REQUEST.
       - name: Run Lighthouse CI
         run: lhci autorun --config=lighthouserc.json
         env:
