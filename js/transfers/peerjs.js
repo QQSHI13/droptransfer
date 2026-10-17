@@ -9,6 +9,27 @@ const MAX_IN_FLIGHT = 32; // Max chunks without acknowledgment
 const ACK_TIMEOUT = 30000; // 30 seconds
 const MAX_RETRIES = 3;
 const CONNECTION_TIMEOUT = 20000;
+// Signalling servers, tried in order. The public PeerJS cloud is unreliable on some
+// networks — measured here at roughly one failed connect attempt in three, and the
+// old code had no timeout at all, so a bad attempt hung on "Creating peer connection..."
+// forever. Put a self-hosted server first once one exists; the object is also exposed
+// as signalingConfig so tests and embedders can point it elsewhere.
+export const signalingConfig = {
+    servers: [
+        { host: '0.peerjs.com', port: 443, secure: true, path: '/' }
+    ],
+    timeoutMs: 12000
+};
+
+const SIGNAL_ERRORS = {
+    'browser-incompatible': 'This browser does not support the WebRTC features needed.',
+    'network': 'Network error talking to the signalling server. Check your connection.',
+    'server-error': 'The signalling server returned an error.',
+    'socket-error': 'Lost the connection to the signalling server.',
+    'socket-closed': 'The signalling server closed the connection.',
+    'peer-unavailable': 'That transfer code is not online any more.'
+};
+
 const HEARTBEAT_INTERVAL = 10000; // 10 seconds
 const HEARTBEAT_TIMEOUT = 30000; // 30 seconds (3 missed heartbeats)
 
@@ -45,6 +66,9 @@ export class PeerJSTransfer {
         // supplies it from the share link. It is never sent over the wire.
         this.secret = null;
         this.isSender = false;
+        // Called when the receiver reports it has the encryption key and can accept
+        // data. Set this BEFORE initSender(): the connection object does not exist yet.
+        this.onReceiverReady = null;
 
         // Transfer state
         this.pendingAcks = new Map();
@@ -80,6 +104,64 @@ export class PeerJSTransfer {
     }
 
     /**
+     * Open a signalling connection, trying each configured server in turn.
+     * Resolves with a peer that has fired 'open', or rejects with everything tried.
+     */
+    _openPeer() {
+        return new Promise((resolve, reject) => {
+            const attempts = [];
+            let index = 0;
+
+            const tryNext = () => {
+                if (index >= signalingConfig.servers.length) {
+                    reject(new Error(
+                        'Could not reach a signalling server (' + attempts.join('; ') +
+                        '). It may be blocked or slow on this network.'
+                    ));
+                    return;
+                }
+
+                const server = signalingConfig.servers[index++];
+                const peer = new Peer({
+                    host: server.host,
+                    port: server.port,
+                    secure: server.secure,
+                    path: server.path,
+                    config: ICE_CONFIG,
+                    debug: 1
+                });
+
+                let settled = false;
+                const timer = setTimeout(() => {
+                    if (settled) return;
+                    settled = true;
+                    attempts.push(server.host + ': no answer in ' + Math.round(signalingConfig.timeoutMs / 1000) + 's');
+                    try { peer.destroy(); } catch (e) { /* already gone */ }
+                    tryNext();
+                }, signalingConfig.timeoutMs);
+
+                peer.on('open', () => {
+                    if (settled) return;
+                    settled = true;
+                    clearTimeout(timer);
+                    resolve(peer);
+                });
+
+                peer.on('error', (err) => {
+                    if (settled) return;
+                    settled = true;
+                    clearTimeout(timer);
+                    attempts.push(server.host + ': ' + (err.type || err.message || 'error'));
+                    try { peer.destroy(); } catch (e) { /* already gone */ }
+                    tryNext();
+                });
+            };
+
+            tryNext();
+        });
+    }
+
+    /**
      * Initialize as sender
      * @param {Function} onReady - Called with (peerId, secret) when ready
      * @param {Function} onError - Called on errors
@@ -95,16 +177,16 @@ export class PeerJSTransfer {
             // we must fail here rather than fall back to an unencrypted transfer.
             this.secret = generateSecret();
 
-            this.peer = new Peer({
-                config: ICE_CONFIG,
-                debug: 1
-            });
+            // Bounded: resolves when a server answers, rejects once all have been tried.
+            this.peer = await this._openPeer();
 
-            this.peer.on('open', (id) => {
-                console.log('[PeerJS] Sender ready, ID:', id);
-                state.set({ peerId: id, connectionState: 'waiting' });
-                onReady?.(id, this.secret);
-            });
+            if (this.abortController.signal.aborted) {
+                this.cleanup();
+                return;
+            }
+
+            console.log('[PeerJS] Sender ready, ID:', this.peer.id);
+            state.set({ peerId: this.peer.id, connectionState: 'waiting' });
 
             this.peer.on('connection', (connection) => {
                 this._handleIncomingConnection(connection, onError);
@@ -112,8 +194,9 @@ export class PeerJSTransfer {
 
             this.peer.on('error', (err) => {
                 console.error('[PeerJS] Peer error:', err);
-                state.set({ connectionState: 'error', errorMessage: err.message });
-                onError?.(err);
+                const msg = SIGNAL_ERRORS[err.type] || err.message || 'Signalling error';
+                state.set({ connectionState: 'error', errorMessage: msg });
+                onError?.(new Error(msg));
             });
 
             this.peer.on('disconnected', () => {
@@ -122,10 +205,14 @@ export class PeerJSTransfer {
                 this.peer.reconnect();
             });
 
+            // Hand the caller a usable peer only once it is actually connected.
+            onReady?.(this.peer.id, this.secret);
+
         } catch (err) {
             console.error('[PeerJS] Failed to initialize sender:', err);
-            state.set({ connectionState: 'error', errorMessage: err.message });
-            onError?.(err);
+            const msg = err.message || 'Could not connect to the signalling server';
+            state.set({ connectionState: 'error', errorMessage: msg });
+            onError?.(new Error(msg));
         }
     }
 
@@ -161,12 +248,14 @@ export class PeerJSTransfer {
         try {
             state.set({ connectionState: 'connecting' });
 
-            this.peer = new Peer({
-                config: ICE_CONFIG,
-                debug: 1
-            });
+            this.peer = await this._openPeer();
 
-            this.peer.on('open', (myId) => {
+            if (this.abortController.signal.aborted) {
+                this.cleanup();
+                return;
+            }
+
+            {
                 console.log('[PeerJS] Receiver ready, connecting to:', code);
 
                 this.conn = this.peer.connect(code, {
@@ -176,7 +265,7 @@ export class PeerJSTransfer {
                 });
 
                 this._setupReceiverConnection(code, onProgress, onComplete, onError);
-            });
+            }
 
             this.peer.on('error', (err) => {
                 console.error('[PeerJS] Peer error:', err);
@@ -639,6 +728,9 @@ export class PeerJSTransfer {
         if (data === 'ready') {
             console.log('[PeerJS] Receiver ready');
             state.set({ transferState: 'sending' });
+            // app.js used to attach a conn listener for this before a connection
+            // existed, so the transfer never began; the hook is owned here now.
+            this.onReceiverReady?.();
         } else if (data === 'received') {
             console.log('[PeerJS] Transfer acknowledged by receiver');
             state.set({ transferState: 'completed' });

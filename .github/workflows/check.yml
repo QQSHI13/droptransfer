@@ -1,0 +1,21 @@
+name: Check transport
+
+# The signalling bug these cover: with no timeout on the peer-open, an unreachable
+# server left the UI on "Creating peer connection..." indefinitely, and the
+# receiver-ready handshake was wired to a connection that did not exist yet.
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  peerjs-transport:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '22'
+      - name: PeerJS transport behaviour checks
+        run: node js/transfers/peerjs.check.mjs

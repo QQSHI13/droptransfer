@@ -145,6 +145,15 @@ class DropTransferApp {
         this.sendStatus.info('Creating peer connection...');
         this.progress.show();
 
+        // The receiver sends 'ready' once it holds the encryption key. This must be
+        // registered BEFORE initSender(): `this.peerTransfer.conn` does not exist until
+        // a receiver actually connects, so attaching a listener to it here was a no-op
+        // and the transfer never started.
+        this.peerTransfer.onReceiverReady = () => {
+            document.getElementById('connectionWaiting').style.display = 'none';
+            this.sendFiles();
+        };
+
         await this.peerTransfer.initSender(
             (peerId, secret) => {
                 // The secret lives in the fragment, which browsers never send to
@@ -163,13 +172,6 @@ class DropTransferApp {
             }
         );
 
-        // Setup receiver-ready handler
-        this.peerTransfer.conn?.on('data', (data) => {
-            if (data === 'ready') {
-                document.getElementById('connectionWaiting').style.display = 'none';
-                this.sendFiles();
-            }
-        });
     }
 
     async sendFiles() {
