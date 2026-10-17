@@ -16,7 +16,9 @@ let behaviour = () => {};          // (peer, index) => void
 class FakePeer {
   constructor(opts) {
     this.opts = opts;
-    this.id = 'peer-' + created.length;
+    // real PeerJS adopts a requested id, so the stub must too — otherwise a bug in
+    // what the app shows as the share code would be invisible here
+    this.id = opts.id || 'peer-' + created.length;
     this.handlers = {};
     this.destroyed = false;
     created.push(this);
@@ -38,6 +40,7 @@ class FakeConn {
 globalThis.Peer = FakePeer;
 
 const { PeerJSTransfer, signalingConfig } = await import(join(here, 'peerjs.js'));
+const { isValidCode, parseTransferCode } = await import(join(here, '..', 'utils.js'));
 
 const results = [];
 const check = (name, ok, detail) => results.push([ok, name, detail]);
@@ -142,7 +145,43 @@ behaviour = (peer) => setTimeout(() => peer.emit('open'), 5);
   check('unrelated messages do not trigger it', hooked === 2, 'hooked=' + hooked);
 }
 
-// 7. the stub is actually being used (guards against a silently unexercised test)
+// 7. REGRESSION: the ids the signalling cloud actually hands out must be accepted.
+// isValidCode's old 6..20 limit rejected the 36-char UUID, so every code the sender
+// displayed ("uuid:secret") failed to parse on the receiver — reported as "the key is
+// invalid", and the share link did nothing at all.
+{
+  const uuid = '05567544-7974-44dc-a713-f44ea558413c';
+  const secret = 'abcdefghijklmnopqrstuv';
+  check('a cloud-assigned UUID id is accepted', isValidCode(uuid) === true, uuid);
+  const parsed = parseTransferCode(uuid + ':' + secret);
+  check('uuid:secret parses into code + secret', parsed && parsed.code === uuid && parsed.secret === secret, JSON.stringify(parsed));
+  const fromLink = parseTransferCode('https://qqshi13.github.io/droptransfer/#' + uuid + ':' + secret);
+  check('the share link parses instead of being ignored', fromLink && fromLink.code === uuid, JSON.stringify(fromLink));
+  check('genuinely wrong input is still rejected', parseTransferCode('just some words') === null, '');
+  check('a missing separator is still rejected', parseTransferCode('abc123') === null, '');
+}
+
+// 8. the sender asks for a short, readable id and recovers from a collision
+reset();
+signalingConfig.servers = [{ host: 'a.test', port: 443, secure: true, path: '/' }];
+signalingConfig.preferShortId = true;
+signalingConfig.idLength = 8;
+signalingConfig.idRetries = 3;
+behaviour = (peer, i) => {
+  if (i === 0) setTimeout(() => peer.emit('error', { type: 'unavailable-id' }), 2);
+  else setTimeout(() => peer.emit('open'), 5);
+};
+{
+  const t = new PeerJSTransfer();
+  const id = await new Promise((resolve) => t.initSender((peerId) => resolve(peerId), () => resolve(null)));
+  check('sender requests a short id, not the server UUID', typeof created[0].opts.id === 'string' && created[0].opts.id.length === 8, JSON.stringify(created[0].opts.id));
+  check('short id uses the unambiguous alphabet', /^[23456789abcdefghjkmnpqrstuvwxyz]{8}$/.test(created[0].opts.id || ''), created[0].opts.id);
+  check('a taken id is retried on the same server', created.length === 2 && created[1].opts.host === 'a.test', 'created=' + created.length);
+  check('retry requests a different id', created[0].opts.id !== created[1].opts.id, created.map((c) => c.opts.id).join(','));
+  check('it ends up connected with a short id', typeof id === 'string' && id.length === 8, id);
+}
+
+// 9. the stub is actually being used (guards against a silently unexercised test)
 check('the suite exercised the real module', created.length > 0 && typeof PeerJSTransfer === 'function', '');
 
 let pass = 0;

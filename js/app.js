@@ -66,7 +66,12 @@ class DropTransferApp {
         if (!location.hash) return;
 
         const parsed = parseTransferCode(location.hash);
-        if (!parsed) return;
+        if (!parsed) {
+            // A link that carries a fragment we cannot parse used to fail silently,
+            // which looked like the link doing nothing at all.
+            this.recvStatus.error('This link does not contain a usable transfer code — paste it below instead.');
+            return;
+        }
 
         const input = document.getElementById('codeInput');
         if (!input) return;
@@ -204,9 +209,14 @@ class DropTransferApp {
         const parsed = parseTransferCode(raw);
 
         if (!parsed) {
+            // Distinguish "no separator at all" from "the two halves look wrong" —
+            // the old catch-all message made a formatting problem sound like a bad key.
             this.recvStatus.error(
-                'Invalid transfer link. Paste the full link from the sender, ' +
-                'or the code in the form abc123:KEY'
+                raw.indexOf(':') === -1
+                    ? 'That is missing the ":" separator. Paste the whole line the sender ' +
+                      'showed (code:KEY) or the full link.'
+                    : 'The code or key looks malformed. Expected code:KEY, where the key is ' +
+                      '22 characters (A–Z a–z 0–9 _ -).'
             );
             return;
         }

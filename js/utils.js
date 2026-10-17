@@ -71,9 +71,13 @@ export function generateId(length = 8) {
  * @returns {boolean} Is valid
  */
 export function isValidCode(code) {
+    // PeerJS ids come in two shapes and both must be accepted: the public cloud
+    // assigns UUIDs (36 chars, e.g. 05567544-7974-44dc-a713-f44ea558413c) while a
+    // self-hosted server can be asked for a short code. The old 6..20 limit rejected
+    // the cloud's own ids, so every code the sender displayed failed to parse here.
     return typeof code === 'string' &&
-           code.length >= 6 &&
-           code.length <= 20 &&
+           code.length >= 4 &&
+           code.length <= 64 &&
            /^[a-zA-Z0-9_-]+$/.test(code);
 }
 

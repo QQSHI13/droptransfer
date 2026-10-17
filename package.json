@@ -10,5 +10,6 @@
     "jszip": "3.10.1",
     "peerjs": "1.5.2",
     "webtorrent": "2.8.5"
-  }
+  },
+  "type": "module"
 }

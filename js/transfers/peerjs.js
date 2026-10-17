@@ -18,8 +18,23 @@ export const signalingConfig = {
     servers: [
         { host: '0.peerjs.com', port: 443, secure: true, path: '/' }
     ],
-    timeoutMs: 12000
+    timeoutMs: 12000,
+    // Ask for a short, readable id instead of accepting the server's UUID: the code
+    // is meant to be read aloud or retyped, and a 36-character UUID is neither.
+    preferShortId: true,
+    idLength: 8,
+    idRetries: 4
 };
+
+// Unambiguous alphabet: no 0/O, 1/l/i look-alikes.
+const ID_ALPHABET = '23456789abcdefghjkmnpqrstuvwxyz';
+
+function randomShortId(len) {
+    const bytes = crypto.getRandomValues(new Uint8Array(len));
+    let out = '';
+    for (let i = 0; i < len; i++) out += ID_ALPHABET[bytes[i] % ID_ALPHABET.length];
+    return out;
+}
 
 const SIGNAL_ERRORS = {
     'browser-incompatible': 'This browser does not support the WebRTC features needed.',
@@ -110,10 +125,11 @@ export class PeerJSTransfer {
     _openPeer() {
         return new Promise((resolve, reject) => {
             const attempts = [];
-            let index = 0;
+            let serverIndex = 0;
+            let idRetries = 0;
 
             const tryNext = () => {
-                if (index >= signalingConfig.servers.length) {
+                if (serverIndex >= signalingConfig.servers.length) {
                     reject(new Error(
                         'Could not reach a signalling server (' + attempts.join('; ') +
                         '). It may be blocked or slow on this network.'
@@ -121,8 +137,13 @@ export class PeerJSTransfer {
                     return;
                 }
 
-                const server = signalingConfig.servers[index++];
+                const server = signalingConfig.servers[serverIndex];
+                const wantedId = signalingConfig.preferShortId
+                    ? randomShortId(signalingConfig.idLength)
+                    : undefined;
+
                 const peer = new Peer({
+                    id: wantedId,
                     host: server.host,
                     port: server.port,
                     secure: server.secure,
@@ -137,6 +158,8 @@ export class PeerJSTransfer {
                     settled = true;
                     attempts.push(server.host + ': no answer in ' + Math.round(signalingConfig.timeoutMs / 1000) + 's');
                     try { peer.destroy(); } catch (e) { /* already gone */ }
+                    serverIndex++;
+                    idRetries = 0;
                     tryNext();
                 }, signalingConfig.timeoutMs);
 
@@ -151,8 +174,20 @@ export class PeerJSTransfer {
                     if (settled) return;
                     settled = true;
                     clearTimeout(timer);
-                    attempts.push(server.host + ': ' + (err.type || err.message || 'error'));
                     try { peer.destroy(); } catch (e) { /* already gone */ }
+
+                    // Our chosen short id can already be taken: pick another and stay
+                    // on the same server rather than burning the next one.
+                    if (err.type === 'unavailable-id' && idRetries < signalingConfig.idRetries) {
+                        idRetries++;
+                        attempts.push(server.host + ': id in use, retrying');
+                        tryNext();
+                        return;
+                    }
+
+                    attempts.push(server.host + ': ' + (err.type || err.message || 'error'));
+                    serverIndex++;
+                    idRetries = 0;
                     tryNext();
                 });
             };
